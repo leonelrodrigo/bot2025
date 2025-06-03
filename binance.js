@@ -9,7 +9,7 @@ const client = Binance({
 
 // Variáveis de Configuração
 
-let balanceAmt = 34.14; // Valor em Amount fixo
+let balanceAmt = 69.99; // Valor em Amount fixo
 
 let strategy = 'LONG';
 let tradeSide = 'BUY';
@@ -24,8 +24,8 @@ const monitoringInterval = 60000;
 const candleInterval = '5m';
 const rsiPeriod = 14;
 
-let rsiBuy = 30; // RSI para comprar abaixo do valor
-let rsiSell = 45; // RSI para Vender acima do valor
+let rsiBuy = 34; // RSI para comprar abaixo do valor
+let rsiSell = 60; // RSI para Vender acima do valor
 
 const alvoSell = 0.5; // Variação Positiva
 const alvoBuy = 0.5; // Variação Negativa
@@ -34,6 +34,9 @@ const secureTrend = 1.0; // Evitar Tendência de Mercado
 
 let secureLow = 1.03; // Preço * porcentegem 
 let secureHigh = 1.03; // Preço / porcentagem
+
+const stopLossPercentLong = 1.0;  // 2% abaixo do preço de compra para LONG
+const stopLossPercentShort = 1.0; // 2% acima do preço de venda para SHORT
 
 //////////////////////////////////////////////////////
 
@@ -115,6 +118,50 @@ async function get24hHigh() {
     } catch (error) {
         console.error('Erro ao obter high 24h:', error.message);
         return null;
+    }
+}
+
+// Função para verificar stop loss para LONG
+async function checkStopLossLong() {
+    if (tradeSide === 'SELL' && buyPrice) {
+        const stopLossPrice = buyPrice * (1 - stopLossPercentLong / 100);
+        if (currentPrice <= stopLossPrice) {
+            console.log(chalk.red(`[${new Date().toLocaleTimeString()}] STOP LOSS LONG acionado! Preço atual: ${currentPrice}, Stop Loss: ${stopLossPrice.toFixed(6)}`));
+
+            // Vender tudo que tem para limitar prejuízo
+            const quantity = Math.max(buyAmount / buyPrice, minQty);
+            const order = await createOrder('SELL', quantity);
+
+            if (order) {
+                tradeSide = 'BUY'; // muda para modo compra
+                buyPrice = null;
+                buyAmount = null;
+                console.log(chalk.red(`✅ Stop Loss LONG executado, posição fechada.`));
+                console.log('-----------------------------------');
+            }
+        }
+    }
+}
+
+// Função para verificar stop loss para SHORT
+async function checkStopLossShort() {
+    if (tradeSide === 'BUY' && sellPrice) {
+        const stopLossPrice = sellPrice * (1 + stopLossPercentShort / 100);
+        if (currentPrice >= stopLossPrice) {
+            console.log(chalk.red(`[${new Date().toLocaleTimeString()}] STOP LOSS SHORT acionado! Preço atual: ${currentPrice}, Stop Loss: ${stopLossPrice.toFixed(6)}`));
+
+            // Comprar para fechar posição short e limitar prejuízo
+            let quantity = Math.max(sellAmount, minQty);
+            const order = await createOrder('BUY', quantity);
+
+            if (order) {
+                tradeSide = 'SELL'; // muda para modo venda
+                sellPrice = null;
+                sellAmount = null;
+                console.log(chalk.red(`✅ Stop Loss SHORT executado, posição fechada.`));
+                console.log('-----------------------------------');
+            }
+        }
     }
 }
 
@@ -320,6 +367,13 @@ async function monitor() {
         let updtRsi = require('./rsi.js');
         rsi = await updtRsi.getValue(symbol, candleInterval, rsiPeriod);
         rsi = Math.round(rsi);
+
+        // Checar StopLoss, antes de executar a estratégia normal:
+        if (strategy === 'LONG') {
+            await checkStopLossLong();
+        } else if (strategy === 'SHORT') {
+            await checkStopLossShort();
+        }
 
         const changeColor = changePercentRaw > 0 ? chalk.green : chalk.red;
 
