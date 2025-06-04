@@ -9,7 +9,7 @@ const client = Binance({
 
 // Variáveis de Configuração
 
-let balanceAmt = 69.99; // Valor em Amount fixo
+let balanceAmt = 69.00; // Valor em Amount fixo
 
 let strategy = 'LONG';
 let tradeSide = 'BUY';
@@ -25,18 +25,18 @@ const candleInterval = '5m';
 const rsiPeriod = 14;
 
 let rsiBuy = 32; // RSI para comprar abaixo do valor
-let rsiSell = 60; // RSI para Vender acima do valor
+let rsiSell = 45; // RSI para Vender acima do valor
 
-const alvoSell = 0.3; // Variação Positiva
-const alvoBuy = 0.3; // Variação Negativa
+const alvoSell = 0.4; // Variação Positiva
+const alvoBuy = 0.4; // Variação Negativa
 
 const secureTrend = 1.0; // Evitar Tendência de Mercado
 
 let secureLow = 1.03; // Preço * porcentegem 
 let secureHigh = 1.03; // Preço / porcentagem
 
-const stopLossPercentLong = 1.0;  // 2% abaixo do preço de compra para LONG
-const stopLossPercentShort = 1.0; // 2% acima do preço de venda para SHORT
+const stopLossPercentLong = 0.5;  // 2% abaixo do preço de compra para LONG
+const stopLossPercentShort = 0.5; // 2% acima do preço de venda para SHORT
 
 //////////////////////////////////////////////////////
 
@@ -210,7 +210,7 @@ async function balanceUpdt() {
     const saldoBase = parseFloat(balances.find(b => b.asset === base)?.free || '0');
     const saldoMoeda = parseFloat(balances.find(b => b.asset === moeda)?.free || '0');
 
-    balanceAmt = saldoBase.toFixed(2);
+    balanceAmt = saldoBase;
 
     console.log(`Saldo disponível de ${base}: ${saldoBase}`);
     console.log(`Saldo disponível de ${moeda}: ${saldoMoeda}`);
@@ -219,7 +219,15 @@ async function balanceUpdt() {
 
 async function createOrder(side, quantity) {
     try {
+
         const roundedQty = roundStepSize(quantity);
+        const notional = currentPrice * roundedQty;
+
+        if (notional < minAmt) {
+            console.error(`❌ Ordem cancelada: Notional ${notional.toFixed(6)} < mínimo exigido (${minAmt})`);
+            return null;
+        }
+
         const order = await client.order({
             symbol,
             side: side.toUpperCase(),
@@ -260,7 +268,7 @@ async function executeSellStrategy() {
 
         if (changePercentage >= alvoSell && trend && aboveDailyLow) {
 
-            balanceUpdt();
+            await balanceUpdt();
 
             console.log(`[${new Date().toLocaleTimeString()}] Variação: ${changePercentage.toFixed(2)}% | Ordem de Venda acionada`);
 
@@ -301,7 +309,7 @@ async function executeBuyStrategy() {
 
         if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
 
-            balanceUpdt();
+            await balanceUpdt();
 
             console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra acionada`);
 
