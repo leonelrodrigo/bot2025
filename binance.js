@@ -24,11 +24,11 @@ const monitoringInterval = 60000;
 const candleInterval = '5m';
 const rsiPeriod = 14;
 
-let rsiBuy = 34; // RSI para comprar abaixo do valor
+let rsiBuy = 32; // RSI para comprar abaixo do valor
 let rsiSell = 60; // RSI para Vender acima do valor
 
-const alvoSell = 0.5; // Variação Positiva
-const alvoBuy = 0.5; // Variação Negativa
+const alvoSell = 0.3; // Variação Positiva
+const alvoBuy = 0.3; // Variação Negativa
 
 const secureTrend = 1.0; // Evitar Tendência de Mercado
 
@@ -382,8 +382,8 @@ async function monitor() {
         const lastSell = sellPrice ? chalk.blackBright(`${sellPrice.toFixed(6)}`) : chalk.gray('N/A');
         const lastBuy = buyPrice ? chalk.blackBright(`${buyPrice.toFixed(6)}`) : chalk.gray('N/A');
         const tradeSideColor = tradeSide === 'SELL'
-            ? chalk.white.bgRedBright.bold(' ' + tradeSide + ' ') + chalk.black.bgBlack('.')
-            : chalk.white.bgGreenBright.bold(' ' + tradeSide + ' ') + chalk.black.bgBlack('.');
+            ? chalk.white.bgRed.bold(' ' + tradeSide + ' ') + chalk.black.bgBlack('.')
+            : chalk.white.bgGreen.bold(' ' + tradeSide + ' ') + chalk.black.bgBlack('.');
 
         const aboveDailyLow = currentPrice > (dailyLow * secureLow);
         const belowDailyHigh = currentPrice < (dailyHigh / secureHigh);
