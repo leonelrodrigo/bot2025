@@ -9,10 +9,11 @@ const client = Binance({
 
 // Variáveis de Configuração
 
-let balanceAmt = 69.00; // Valor em Amount fixo
+let balanceAmt = null; // Valor em Amount fixo
+let balanceQty = 5;
 
-let strategy = 'LONG';
-let tradeSide = 'BUY';
+let strategy = 'SHORT';
+let tradeSide = 'SELL';
 
 const base = 'USDT';
 const moeda = 'NXPC';
@@ -24,23 +25,25 @@ const monitoringInterval = 60000;
 const candleInterval = '5m';
 const rsiPeriod = 14;
 
-let rsiBuy = 32; // RSI para comprar abaixo do valor
-let rsiSell = 45; // RSI para Vender acima do valor
+let rsiBuy = 55; // RSI para comprar abaixo do valor
+let rsiSell = 60; // RSI para Vender acima do valor
 
-const alvoSell = 0.4; // Variação Positiva
-const alvoBuy = 0.4; // Variação Negativa
+const alvoSell = 0.5; // Variação Positiva
+const alvoBuy = 0.5; // Variação Negativa
 
 const secureTrend = 1.0; // Evitar Tendência de Mercado
 
 let secureLow = 1.03; // Preço * porcentegem 
 let secureHigh = 1.03; // Preço / porcentagem
 
-const stopLossPercentLong = 0.5;  // 2% abaixo do preço de compra para LONG
-const stopLossPercentShort = 0.5; // 2% acima do preço de venda para SHORT
+const stopLossPercentLong = 1.0;  // 2% abaixo do preço de compra para LONG
+const stopLossPercentShort = 1.0; // 2% acima do preço de venda para SHORT
 
 //////////////////////////////////////////////////////
 
 // Variáveis Dinâmicas
+
+let stopLoss = false;
 
 let previousCandleClose = null;
 let currentPrice = null;
@@ -51,9 +54,9 @@ let sellPrice = null;
 let trend = null;
 let rsi = null;
 
-let minQty = null; //0.1;
-let minAmt = null; //5;
-let stepSize = null; //0.000001;
+let minQty = null;
+let minAmt = null;
+let stepSize = null;
 
 const symbol = `${moeda}${base}`;
 
@@ -81,11 +84,11 @@ async function updateMinOrderQty() {
 
         balanceUpdt();
 
-        /*
+        // Delete
         console.log(`Valor mínimo de ordem em ${base}: ${minAmt}`);
         console.log(`Quantidade mínima de ${moeda}: ${minQty}`);
         console.log(`Step Size de ${moeda}: ${stepSize}`);
-        */
+
     } catch (error) {
         console.error('Erro ao obter mínimos:', error.message);
     }
@@ -126,16 +129,23 @@ async function checkStopLossLong() {
     if (tradeSide === 'SELL' && buyPrice) {
         const stopLossPrice = buyPrice * (1 - stopLossPercentLong / 100);
         if (currentPrice <= stopLossPrice) {
+            //stopLoss = true;
+
             console.log(chalk.red(`[${new Date().toLocaleTimeString()}] STOP LOSS LONG acionado! Preço atual: ${currentPrice}, Stop Loss: ${stopLossPrice.toFixed(6)}`));
 
             // Vender tudo que tem para limitar prejuízo
-            const quantity = Math.max(buyAmount / buyPrice, minQty);
+            let minAmtQty = minAmt / buyPrice;
+
+            let quantity = Math.max(buyAmount / buyPrice, minAmtQty);
+
+            console.log('StopLossLong: ' + quantity);
+
             const order = await createOrder('SELL', quantity);
 
             if (order) {
                 tradeSide = 'BUY'; // muda para modo compra
                 buyPrice = null;
-                buyAmount = null;
+                //buyAmount = null;
                 console.log(chalk.red(`✅ Stop Loss LONG executado, posição fechada.`));
                 console.log('-----------------------------------');
             }
@@ -148,16 +158,21 @@ async function checkStopLossShort() {
     if (tradeSide === 'BUY' && sellPrice) {
         const stopLossPrice = sellPrice * (1 + stopLossPercentShort / 100);
         if (currentPrice >= stopLossPrice) {
+            //stopLoss = true;
+
             console.log(chalk.red(`[${new Date().toLocaleTimeString()}] STOP LOSS SHORT acionado! Preço atual: ${currentPrice}, Stop Loss: ${stopLossPrice.toFixed(6)}`));
 
             // Comprar para fechar posição short e limitar prejuízo
             let quantity = Math.max(sellAmount, minQty);
+
+            console.log('StopLossShort: ' + quantity);
+
             const order = await createOrder('BUY', quantity);
 
             if (order) {
                 tradeSide = 'SELL'; // muda para modo venda
                 sellPrice = null;
-                sellAmount = null;
+                //sellAmount = null;
                 console.log(chalk.red(`✅ Stop Loss SHORT executado, posição fechada.`));
                 console.log('-----------------------------------');
             }
@@ -211,6 +226,7 @@ async function balanceUpdt() {
     const saldoMoeda = parseFloat(balances.find(b => b.asset === moeda)?.free || '0');
 
     balanceAmt = saldoBase;
+    balanceQty = saldoMoeda;
 
     console.log(`Saldo disponível de ${base}: ${saldoBase}`);
     console.log(`Saldo disponível de ${moeda}: ${saldoMoeda}`);
@@ -221,12 +237,6 @@ async function createOrder(side, quantity) {
     try {
 
         const roundedQty = roundStepSize(quantity);
-        const notional = currentPrice * roundedQty;
-
-        if (notional < minAmt) {
-            console.error(`❌ Ordem cancelada: Notional ${notional.toFixed(6)} < mínimo exigido (${minAmt})`);
-            return null;
-        }
 
         const order = await client.order({
             symbol,
@@ -237,10 +247,10 @@ async function createOrder(side, quantity) {
 
         logOrderDetails(order);
 
-        if (side.toUpperCase() === 'SELL') {
+        if (side.toUpperCase() === 'SELL' && strategy === 'SHORT' && stopLoss === false) {
             sellPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
             sellAmount = parseFloat(order.executedQty);
-        } else if (side.toUpperCase() === 'BUY') {
+        } else if (side.toUpperCase() === 'BUY' && strategy === 'LONG' && stopLoss === false) {
             buyPrice = parseFloat(order.cummulativeQuoteQty) / parseFloat(order.executedQty);
             buyAmount = parseFloat(order.cummulativeQuoteQty);
         }
@@ -275,7 +285,8 @@ async function executeSellStrategy() {
             let quantity;
 
             if (strategy === 'SHORT') {
-                quantity = Math.max(sellAmount, minQty);
+                quantity = Math.max(balanceQty, minQty);
+
             } else {
                 const amountBuy = balanceAmt / currentPrice; // Modificado para farm de Token na strategy Long
                 quantity = Math.max(amountBuy, minQty);
@@ -286,6 +297,7 @@ async function executeSellStrategy() {
             if (order) {
                 tradeSide = 'BUY';
                 buyPrice = null;
+                buyAmount = null;
                 console.log(`✅ Venda executada: ${quantity} ${moeda}`);
                 console.log('-----------------------------------');
             }
@@ -318,7 +330,7 @@ async function executeBuyStrategy() {
             let minAmtQty = minAmt / currentPrice;
 
             if (strategy === 'SHORT') {
-                const amountSell = sellAmount * sellPrice;
+                const amountSell = balanceQty * sellPrice;
                 quantity = Math.max(amountSell / currentPrice, minAmtQty);
             } else {
                 // quantity = Math.max(buyAmount / currentPrice, minQty);
@@ -331,6 +343,7 @@ async function executeBuyStrategy() {
             if (order) {
                 tradeSide = 'SELL';
                 sellPrice = null;
+                sellAmount = null;
                 console.log(`✅ Compra executada: ${quantity} ${moeda}`);
                 console.log('-----------------------------------');
             }
