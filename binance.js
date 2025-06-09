@@ -33,8 +33,8 @@ const alvoBuy = 0.5; // Variação Negativa
 
 const secureTrend = 1.0; // Evitar Tendência de Mercado
 
-let secureLow = 1.02; // Preço * porcentegem 
-let secureHigh = 1.02; // Preço / porcentagem
+let secureLow = 1.01; // Preço * porcentegem 
+let secureHigh = 1.00; // Preço / porcentagem
 
 const stopLossPercentLong = 0.5;  // 2% abaixo do preço de compra para LONG
 const stopLossPercentShort = 0.5; // 2% acima do preço de venda para SHORT
