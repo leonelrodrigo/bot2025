@@ -276,7 +276,7 @@ async function executeSellStrategy() {
         changePercentage = ((currentPrice - buyPrice) / buyPrice) * 100;
     }
 
-    if (tradeSide === 'SELL' && rsi >= rsiSell || rsiSell === 0) {
+    if (tradeSide === 'SELL' && rsi >= rsiSell || tradeSide === 'SELL' && rsiSell === 0) {
 
         if (changePercentage >= alvoSell && trend && aboveDailyLow) {
 
@@ -319,7 +319,7 @@ async function executeBuyStrategy() {
         changePercentage = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
     }
 
-    if (tradeSide === 'BUY' && rsi <= rsiBuy || rsiBuy === 0) {
+    if (tradeSide === 'BUY' && rsi <= rsiBuy || tradeSide === 'BUY' && rsiBuy === 0) {
 
         if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
 
