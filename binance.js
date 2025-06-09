@@ -33,11 +33,11 @@ const alvoBuy = 0.5; // Variação Negativa
 
 const secureTrend = 1.0; // Evitar Tendência de Mercado
 
-let secureLow = 1.03; // Preço * porcentegem 
-let secureHigh = 1.03; // Preço / porcentagem
+let secureLow = 1.02; // Preço * porcentegem 
+let secureHigh = 1.02; // Preço / porcentagem
 
-const stopLossPercentLong = 1.0;  // 2% abaixo do preço de compra para LONG
-const stopLossPercentShort = 1.0; // 2% acima do preço de venda para SHORT
+const stopLossPercentLong = 0.5;  // 2% abaixo do preço de compra para LONG
+const stopLossPercentShort = 0.5; // 2% acima do preço de venda para SHORT
 
 //////////////////////////////////////////////////////
 
@@ -163,7 +163,9 @@ async function checkStopLossShort() {
             console.log(chalk.red(`[${new Date().toLocaleTimeString()}] STOP LOSS SHORT acionado! Preço atual: ${currentPrice}, Stop Loss: ${stopLossPrice.toFixed(6)}`));
 
             // Comprar para fechar posição short e limitar prejuízo
-            let quantity = Math.max(sellAmount, minQty);
+            await balanceUpdt(); // Garante que balanceAmt está atualizado
+            let amountBuy = balanceAmt / currentPrice;
+            let quantity = Math.max(amountBuy, minQty);
 
             console.log('StopLossShort: ' + quantity);
 
