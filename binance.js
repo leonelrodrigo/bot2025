@@ -25,8 +25,8 @@ const monitoringInterval = 60000;
 const candleInterval = '5m';
 const rsiPeriod = 14;
 
-let rsiBuy = 55; // RSI para comprar abaixo do valor
-let rsiSell = 60; // RSI para Vender acima do valor
+let rsiBuy = 0; // RSI para comprar abaixo do valor
+let rsiSell = 50; // RSI para Vender acima do valor
 
 const alvoSell = 0.5; // Variação Positiva
 const alvoBuy = 0.5; // Variação Negativa
