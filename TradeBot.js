@@ -17,6 +17,8 @@ async function fetchCache(path, params = {}) {
     });
     const res = await fetch(url.href);
     if (!res.ok) throw new Error(`Cache server ${res.status} ${res.statusText}`);
+    if (res.status === 204) return null;
+    // some endpoints (e.g. tradeFee when no credenciais) may return 204
     return res.json();
 }
 
@@ -1414,17 +1416,32 @@ async function executeBuyStrategy() {
 
 async function monitor() {
     try {
-        // buscar preço atual no cache server
-        const resp = await fetch(`${CACHE_URL}/price?symbol=${symbol}`);
-        if (resp.ok) {
-            const json = await resp.json();
-            currentPrice = parseFloat(json.price);
-        } else {
-            console.warn('[monitor] falha ao obter preço', resp.status);
+        // certificar-se de que o cache server já está rastreando nosso par/intervalo
+        try {
+            await fetch(`${CACHE_URL}/cache?symbol=${symbol}&interval=${candleInterval}`);
+        } catch (e) {
+            // falha aqui não impede tentativa de pegar preço, mas deve ser investigada
+            console.warn('[monitor] não foi possível solicitar cache inicial:', e.message);
         }
-        await update24hStats();
 
-        if (currentPrice === undefined || currentPrice === null || isNaN(currentPrice)) {
+        // buscar preço atual no cache server (com pequenas tentativas)
+        let attempts = 0;
+        while (attempts < 3) {
+            attempts++;
+            const resp = await fetch(`${CACHE_URL}/price?symbol=${symbol}`);
+            if (resp.ok) {
+                const json = await resp.json();
+                currentPrice = json && json.price != null ? parseFloat(json.price) : null;
+            } else {
+                console.warn('[monitor] falha ao obter preço', resp.status);
+            }
+            await update24hStats();
+            if (currentPrice && !isNaN(currentPrice) && currentPrice > 0) break;
+            // aguarda 100ms e tenta novamente (cache server pode ainda estar priming)
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        if (currentPrice === undefined || currentPrice === null || isNaN(currentPrice) || currentPrice <= 0) {
             throw new Error('Preço atual inválido');
         }
 
@@ -1541,6 +1558,20 @@ async function monitor() {
     console.log(`Estratégia: ${strategy} | Par: ${symbol} | Intervalo: ${candleInterval}`);
     console.log(`Taxas configuradas → Market: ${(TAX_MARKET * 100).toFixed(2)}% | Limit: ${(TAX_LIMIT * 100).toFixed(3)}%`);
     console.log('-----------------------------------');
+
+    function logTS(msg) {
+        const d = new Date();
+        const pad = n => String(n).padStart(2,'0');
+        const ts = `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
+        console.log(`${ts} ${msg}`);
+    }
+
+    // wrap monitor to log timestamp only at start
+    const originalMonitor = monitor;
+    monitor = async function() {
+        logTS('início de monitor');
+        await originalMonitor();
+    };
 
     await updateMinOrderQty();
     await applySymbolFeesOnInit();

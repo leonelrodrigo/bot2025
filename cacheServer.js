@@ -76,11 +76,35 @@ async function pollCandles(symbol, interval) {
 }
 
 // helpers para manter preço e stats atualizados
+// guarda a última vez que um preço inválido foi logado, para não floodar
+const lastInvalidLogTs = new Map();
+const INVALID_LOG_THROTTLE_MS = 60 * 1000; // 1 minuto
+
 function subscribePrice(symbol) {
     if (priceStore.has(symbol)) return;
     priceStore.set(symbol, null);
     binance.ws.ticker(symbol, ticker => {
-        const p = parseFloat(ticker.lastPrice || ticker.curDayClosePrice || ticker.close || 0);
+        // event payload may vary; try multiple fields
+        const p = parseFloat(
+            ticker.lastPrice ||
+            ticker.curDayClosePrice ||
+            ticker.curDayClose ||
+            ticker.close ||
+            ticker.price ||
+            0
+        );
+        if (isNaN(p) || p <= 0) {
+            const now = Date.now();
+            const prev = lastInvalidLogTs.get(symbol) || 0;
+            if (now - prev > INVALID_LOG_THROTTLE_MS) {
+                // log raw ticker payload for sniffing
+                const ts = (() => { const d=new Date(),pad=n=>String(n).padStart(2,'0'); return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;})();
+                console.log(`${ts} ticker WS para ${symbol} veio com preço inválido (${p}), payload: ${JSON.stringify(ticker)}`);
+                lastInvalidLogTs.set(symbol, now);
+            }
+            // ignore invalid value without overwriting existing price
+            return;
+        }
         if (useRedis) redisClient.hSet('prices', symbol, String(p)).catch(() => { });
         priceStore.set(symbol, p);
     });
@@ -96,13 +120,23 @@ async function update24h(symbol) {
     }
 }
 
-function trackSymbol(symbol, interval) {
+async function trackSymbol(symbol, interval) {
     const key = `${symbol}:${interval}`;
     if (trackers.has(key)) return;
+
+    const ts = (() => {
+        const d = new Date();
+        const pad = n => String(n).padStart(2,'0');
+        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
+    })();
+    console.log(`${ts} trackSymbol chamado para ${symbol}@${interval}`);
 
     // garante que preço e stats sejam assinados/atualizados
     subscribePrice(symbol);
     update24h(symbol);
+
+    // priming: fetch price imediatamente via REST para evitar zero/404 inicial
+    await pollPriceOnce(symbol);
 
     pollCandles(symbol, interval);
     const timer = setInterval(() => pollCandles(symbol, interval), POLL_INTERVAL);
@@ -110,10 +144,36 @@ function trackSymbol(symbol, interval) {
     console.log(`🛠️  Iniciada monitoração de ${symbol}@${interval}`);
 }
 
+async function pollPriceOnce(symbol) {
+    const ts = (() => {
+        const d = new Date();
+        const pad = n => String(n).padStart(2,'0');
+        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
+    })();
+    try {
+        const tick = await binance.prices({ symbol });
+        const p = parseFloat(tick[symbol]);
+        console.log(`[${ts}] pollPriceOnce para ${symbol} retornou ${p}`);
+        if (!isNaN(p) && p > 0) {
+            if (useRedis) await redisClient.hSet('prices', symbol, String(p));
+            priceStore.set(symbol, p);
+            console.log(`[${ts}] preço imediatamente armazenado para ${symbol}: ${p}`);
+        }
+    } catch (e) {
+        console.warn(`[${ts}] pollPriceOnce erro para ${symbol}:`, e.message || e);
+        // não crítico, será atualizado via ws
+    }
+}
+
 const app = express();
 
 // endpoints adicionais para dados de mercado centralizados
 app.get('/price', async (req, res) => {
+    const ts = (() => {
+        const d = new Date();
+        const pad = n => String(n).padStart(2,'0');
+        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
+    })();
     const { symbol } = req.query;
     if (!symbol) return res.status(400).send('symbol é obrigatório');
     let p;
@@ -122,14 +182,42 @@ app.get('/price', async (req, res) => {
             p = await redisClient.hGet('prices', symbol);
         }
         if (!p) p = priceStore.get(symbol);
-        if (p === undefined || p === null) return res.status(404).send('preço não disponível');
-        res.json({ price: parseFloat(p) });
+        // se não achamos nada, fazer um poll rápido extra para tentar obter
+        if (p === undefined || p === null) {
+            console.log(`[${ts}] /price sem valor para ${symbol}, forçando pollPriceOnce`);
+            await pollPriceOnce(symbol);
+            if (useRedis) {
+                p = await redisClient.hGet('prices', symbol);
+            }
+            if (!p) p = priceStore.get(symbol);
+        }
+        // não aceitaremos preço zero ou negativo
+        if (p === undefined || p === null) {
+            console.log(`[${ts}] /price ainda não disponível para ${symbol}`);
+            return res.status(404).send('preço não disponível');
+        }
+        const num = parseFloat(p);
+        if (isNaN(num) || num <= 0) {
+            console.log(`${ts} /price retornou valor inválido (${p}) para ${symbol}`);
+            // debug: mostrar o que está atualmente em cache
+            if (useRedis) {
+                try {
+                    const stored = await redisClient.hGet('prices', symbol);
+                    console.log(`${ts} [debug] Redis contém para ${symbol}: ${stored}`);
+                } catch (e) {
+                    console.warn(`${ts} [debug] falha ao ler Redis:`, e.message || e);
+                }
+            }
+            const memVal = priceStore.get(symbol);
+            console.log(`${ts} [debug] memória contém para ${symbol}: ${memVal}`);
+            return res.status(404).send('preço inválido');
+        }
+        res.json({ price: num });
     } catch (err) {
         console.error('erro em /price', err.message || err);
         res.status(500).send('erro interno');
     }
 });
-
 app.get('/stats24h', async (req, res) => {
     const { symbol } = req.query;
     if (!symbol) return res.status(400).send('symbol é obrigatório');
@@ -152,7 +240,7 @@ app.get('/cache', async (req, res) => {
     const { symbol, interval } = req.query;
     if (!symbol || !interval) return res.status(400).send('symbol e interval são obrigatórios');
 
-    trackSymbol(symbol, interval);
+    await trackSymbol(symbol, interval); // ensure priming done
     const key = `candles:${symbol}:${interval}`;
 
     // trackSymbol já dispara um poll imediato na primeira vez, portanto não
@@ -201,6 +289,11 @@ app.get('/tradeFee', async (req, res) => {
         const now = Date.now();
         if (tradeFeeCache.data[symbol] && (now - tradeFeeCache.ts < 10 * 60 * 1000)) {
             return res.json(tradeFeeCache.data[symbol]);
+        }
+        // se não há credenciais, retornamos 204 em vez de 500
+        if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_API_SECRET) {
+            console.warn('tradeFee pedido mas sem credencial no servidor');
+            return res.status(204).end();
         }
         const fees = await binance.tradeFee({ symbol });
         tradeFeeCache.data[symbol] = fees;

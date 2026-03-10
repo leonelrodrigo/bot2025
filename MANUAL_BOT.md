@@ -60,6 +60,7 @@ Coloque esses valores em um arquivo `.env` ou exporte no shell.
 ### Funcionamento
 - Recebe requisições GET `/cache?symbol=XXX&interval=YYY` para candles.
 - Ao primeiro pedido para um símbolo/intervalo, inicia polling (via `binance.candles`) e grava fechamentos (`close`) no Redis ou em memória.
+- Também faz uma chamada REST imediata para “prime” o preço do par, garantindo que os bots obtenham um valor real em vez de 0/404.
 - Mantém uma única conexão WebSocket com a Binance para receber **preços em tempo real** e estatísticas 24h de todos símbolos monitorados.
 - Cada novo par/intervalo rastreado via `/cache` também garante a assinatura do preço e a atualização periódica de stats.
 - A cada `POLL_INTERVAL_MS` repete o polling, substituindo o valor no cache e atualizando stats.
