@@ -1,0 +1,23 @@
+{
+  "sessao": {
+    "inicio": "",
+    "modo": "DEMO",
+    "symbol": "ETHUSDT"
+  },
+  "trades": {
+    "total": 0,
+    "lucrativos": 0,
+    "prejuizo": 0,
+    "stopLossAcionados": 0
+  },
+  "financeiro": {
+    "lucroLiquidoTotal": 0,
+    "taxasTotais": 0,
+    "maiorLucroTrade": 0,
+    "maiorPrejuizoTrade": 0,
+    "saldoInicialBase": 0,
+    "saldoAtualBase": 0,
+    "saldoAtualMoeda": 0
+  },
+  "historico": []
+}

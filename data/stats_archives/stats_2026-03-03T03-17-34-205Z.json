@@ -1,0 +1,23 @@
+{
+  "_comentario": "Gerado automaticamente pelo bot. Não edite manualmente.",
+  "sessao": {
+    "inicio": "2026-02-23T22:04:54.903Z",
+    "modo": "DEMO",
+    "symbol": "USDTETH"
+  },
+  "trades": {
+    "total": 3,
+    "lucrativos": 0,
+    "prejuizo": 3,
+    "stopLossAcionados": 0
+  },
+  "financeiro": {
+    "lucroLiquidoTotal": -0.09386228,
+    "taxasTotais": 0.15978728,
+    "maiorLucroTrade": 0,
+    "maiorPrejuizoTrade": -0.0498036,
+    "saldoInicialBase": 100,
+    "saldoAtualBase": 48.03743094
+  },
+  "historico": []
+}

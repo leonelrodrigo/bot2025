@@ -1,0 +1,23 @@
+{
+  "sessao": {
+    "inicio": "2026-03-03T03:17:34.207Z",
+    "modo": "REAL",
+    "symbol": "ETHUSDT"
+  },
+  "trades": {
+    "total": 12,
+    "lucrativos": 6,
+    "prejuizo": 6,
+    "stopLossAcionados": 4
+  },
+  "financeiro": {
+    "lucroLiquidoTotal": -0.09885489,
+    "taxasTotais": 0.2352709,
+    "maiorLucroTrade": 0.2405849,
+    "maiorPrejuizoTrade": -0.37517982,
+    "saldoInicialBase": 43.01805594,
+    "saldoAtualBase": 25.68938824,
+    "saldoAtualMoeda": 0.0119016
+  },
+  "historico": []
+}

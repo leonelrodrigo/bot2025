@@ -1,0 +1,61 @@
+{
+  "_comentario": "Arquivo de configuração da estratégia do bot. Edite aqui sem mexer no código.",
+  "modo": {
+    "demo": false,
+    "strategy": "SHORT",
+    "tradeSide": "SELL",
+    "base": "USDT",
+    "moeda": "ETH"
+  },
+  "dca": {
+    "enabled": true,
+    "maxOrders": 3,
+    "targetPercent": 0.5,
+    "adaptiveStopLoss": true,
+    "stopLossBuffer": 1.5,
+    "profitConfig": {
+      "baseProfit": 0.5,
+      "extraOrderMultiplier": 1.2,
+      "minTotalProfit": 0.5,
+      "maxTotalProfit": 2.0,
+      "compoundProfits": false
+    }
+  },
+  "taxas": {
+    "_comentario": "Taxas da Binance por tipo de ordem. Usadas nos cálculos de lucro simulado no modo demo.",
+    "market": 0.001,
+    "limit": 0.0005
+  },
+  "timing": {
+    "monitoringInterval": 60000,
+    "candleInterval": "15m",
+    "rsiPeriod": 14
+  },
+  "rsi": {
+    "rsiBuy": 60,
+    "rsiSell": 50
+  },
+  "alvos": {
+    "alvoSell": 0.5,
+    "alvoBuy": 0.5
+  },
+  "seguranca": {
+    "_comentario_secureTrend": 0,
+    "_comentario_secureLow": 1,
+    "_comentario_secureHigh": 1,
+    "secureTrend": 2.0,
+    "secureLow": 1.01,
+    "secureHigh": 1.01,
+    "stopLossPercentLong": 0,
+    "stopLossPercentShort": 0,
+    "pctCompra": 1.0,
+    "pctVenda": 1.0,
+    "pctBaseLong": 0.5,
+    "pctMoedaShort": 0.5
+  },
+  "demo_saldo_inicial": {
+    "_comentario": "Saldo simulado inicial usado quando demo=true",
+    "USDT": 100.0,
+    "moeda": 0.0
+  }
+}
