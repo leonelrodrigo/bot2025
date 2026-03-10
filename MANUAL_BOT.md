@@ -76,6 +76,12 @@ Coloque esses valores em um arquivo `.env` ou exporte no shell.
 - **GET /stats24h**
   - Parâmetros: `symbol`
   - Resposta: objeto JSON com lowPrice/highPrice/etc. ou 404 se não disponível.
+- **GET /exchangeInfo**
+  - Parâmetros opcionais: `symbol`.
+  - Retorna o `exchangeInfo` completo ou apenas a entrada referente a `symbol`.
+- **GET /tradeFee**
+  - Parâmetros: `symbol`.
+  - Retorna o array de taxas de trade (cache de 10 min).
 
 ### Configuração
 - Ajuste porta com `CACHE_PORT`.

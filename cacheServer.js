@@ -21,6 +21,17 @@ const statsStore = new Map();   // symbol -> { lowPrice, highPrice, ... }
 // chaves de tracking em memória para evitar polls duplicados
 const trackers = new Map(); // key -> timerId
 
+// caches adicionais para preços e 24h stats
+// usamos hset/hget no Redis, ou Maps locais se Redis indisponível
+
+// no Redis usaremos as hashes 'prices' e 'stats24h'
+
+// cache de exchangeInfo para evitar várias chamadas
+let exchangeInfoCache = null;
+
+// cache de trade fees similares ao bot
+let tradeFeeCache = { ts: 0, data: {} };
+
 async function createRedis() {
     try {
         redisClient = redis.createClient({
@@ -162,6 +173,46 @@ app.get('/cache', async (req, res) => {
         res.status(500).send('erro ao ler cache');
     }
 });
+
+// endpoint para consultar exchangeInfo (cache simples)
+app.get('/exchangeInfo', async (req, res) => {
+    const { symbol } = req.query;
+    try {
+        if (!exchangeInfoCache) {
+            exchangeInfoCache = await binance.exchangeInfo();
+        }
+        if (symbol) {
+            const info = exchangeInfoCache.symbols.find(s => s.symbol === symbol);
+            if (!info) return res.status(404).send('symbol não encontrado');
+            return res.json(info);
+        }
+        res.json(exchangeInfoCache);
+    } catch (e) {
+        console.error('erro /exchangeInfo:', e.message || e);
+        res.status(500).send('erro interno');
+    }
+});
+
+// endpoint para taxas de trade
+app.get('/tradeFee', async (req, res) => {
+    const { symbol } = req.query;
+    if (!symbol) return res.status(400).send('symbol é obrigatório');
+    try {
+        const now = Date.now();
+        if (tradeFeeCache.data[symbol] && (now - tradeFeeCache.ts < 10 * 60 * 1000)) {
+            return res.json(tradeFeeCache.data[symbol]);
+        }
+        const fees = await binance.tradeFee({ symbol });
+        tradeFeeCache.data[symbol] = fees;
+        tradeFeeCache.ts = now;
+        res.json(fees);
+    } catch (e) {
+        console.error('erro /tradeFee:', e.message || e);
+        res.status(500).send('erro interno');
+    }
+});
+
+// não há mais handlers de stats duplicados; endpoints já definidos acima
 
 (async () => {
     await createRedis();

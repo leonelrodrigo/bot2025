@@ -1,5 +1,6 @@
 const Binance = require('binance-api-node').default;
-const fetch = global.fetch || require('node-fetch'); // usa fetch nativo se disponível, ou pacoteconst DCAStrategy = require('./dcaStrategy.js');
+const fetch = global.fetch || require('node-fetch'); // usa fetch nativo se disponível, ou pacote
+const DCAStrategy = require('./dcaStrategy.js');
 const chalk = require('chalk');
 const updtRsi = require('./rsi.js');
 const fs = require('fs');
@@ -8,6 +9,16 @@ require('dotenv').config();
 
 // URL do cache server centralizado (onde RSI, preços e stats estarão)
 const CACHE_URL = process.env.CACHE_URL || `http://localhost:${process.env.CACHE_PORT || 4000}`;
+
+async function fetchCache(path, params = {}) {
+    const url = new URL(`${CACHE_URL}/${path}`);
+    Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null) url.searchParams.append(k, v);
+    });
+    const res = await fetch(url.href);
+    if (!res.ok) throw new Error(`Cache server ${res.status} ${res.statusText}`);
+    return res.json();
+}
 
 // ─────────────────────────────────────────────
 // Carrega configurações externas (config.json)
@@ -207,12 +218,11 @@ let tradeFeePerSymbol = {}; // mapping symbol -> taker fee (decimal)
 const DEFAULT_FEE_CACHE_TTL = 10 * 60 * 1000;
 
 async function fetchTradeFees(symbol) {
-    // cache por 10 minutos
+    // cache por 10 minutos local também
     const now = Date.now();
     if (tradeFeeCache.data && (now - tradeFeeCache.ts) < 10 * 60 * 1000) return tradeFeeCache.data;
     try {
-        // endpoint /sapi/v1/asset/tradeFee?symbol=SYMBOL
-        const fees = await withRetry(() => client.tradeFee({ symbol }), [], 2, 500);
+        const fees = await fetchCache('tradeFee', { symbol });
         tradeFeeCache = { ts: now, data: fees };
         // fees geralmente retorna array; encontrar entry para symbol
         if (fees && Array.isArray(fees)) {
@@ -225,8 +235,14 @@ async function fetchTradeFees(symbol) {
         }
         return fees;
     } catch (err) {
-        console.warn('Não foi possível obter trade fees da API, usando configuração local. Erro:', err.message || err);
-        return null;
+        console.warn('Não foi possível obter trade fees via cache server, fallback local. Erro:', err.message || err);
+        try {
+            const directFees = await withRetry(() => client.tradeFee({ symbol }), [], 2, 500);
+            tradeFeeCache = { ts: now, data: directFees };
+            return directFees;
+        } catch (e) {
+            return null;
+        }
     }
 }
 
@@ -614,10 +630,8 @@ async function withRetry(fn, args = [], retries = 3, delay = 500) {
 
 async function updateMinOrderQty() {
     try {
-        const exchangeInfo = await withRetry(() => client.exchangeInfo(), [], 3, 1000);
-        const symbolInfo = exchangeInfo.symbols.find(s => s.symbol === symbol);
-
-        if (!symbolInfo) throw new Error(`Símbolo ${symbol} não encontrado.`);
+        const symbolInfo = await fetchCache('exchangeInfo', { symbol });
+        if (!symbolInfo) throw new Error(`Símbolo ${symbol} não encontrado via cache`);
 
         const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
         const minNotionalFilter =
@@ -638,7 +652,7 @@ async function updateMinOrderQty() {
         console.log(`Step Size de ${moeda}: ${stepSize}`);
 
     } catch (error) {
-        console.error('Erro ao obter mínimos:', error.message);
+        console.error('Erro ao obter mínimos via cache:', error.message);
     }
 }
 
