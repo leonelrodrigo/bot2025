@@ -14,6 +14,10 @@ let redisClient = null;
 let useRedis = true;          // indicador se Redis está disponível
 const inMemoryStore = new Map(); // fallback se Redis cair
 
+// caches extras (preços e stats) para fornecer ao bot
+const priceStore = new Map();   // symbol -> lastPrice
+const statsStore = new Map();   // symbol -> { lowPrice, highPrice, ... }
+
 // chaves de tracking em memória para evitar polls duplicados
 const trackers = new Map(); // key -> timerId
 
@@ -53,14 +57,41 @@ async function pollCandles(symbol, interval) {
             inMemoryStore.set(key, closes);
         }
         console.log(`🔁 [cache] atualizado ${symbol}@${interval} (${closes.length} valores)`);
+        // também atualiza stats 24h sempre que houver poll de candles
+        await update24h(symbol);
     } catch (err) {
         console.warn(`Falha ao buscar candles ${symbol}@${interval}:`, err.message || err);
+    }
+}
+
+// helpers para manter preço e stats atualizados
+function subscribePrice(symbol) {
+    if (priceStore.has(symbol)) return;
+    priceStore.set(symbol, null);
+    binance.ws.ticker(symbol, ticker => {
+        const p = parseFloat(ticker.lastPrice || ticker.curDayClosePrice || ticker.close || 0);
+        if (useRedis) redisClient.hSet('prices', symbol, String(p)).catch(() => { });
+        priceStore.set(symbol, p);
+    });
+}
+
+async function update24h(symbol) {
+    try {
+        const stats = await binance.dailyStats({ symbol });
+        if (useRedis) await redisClient.hSet('stats24h', symbol, JSON.stringify(stats));
+        statsStore.set(symbol, stats);
+    } catch (e) {
+        console.warn('Falha ao obter stats 24h para', symbol, e.message || e);
     }
 }
 
 function trackSymbol(symbol, interval) {
     const key = `${symbol}:${interval}`;
     if (trackers.has(key)) return;
+
+    // garante que preço e stats sejam assinados/atualizados
+    subscribePrice(symbol);
+    update24h(symbol);
 
     pollCandles(symbol, interval);
     const timer = setInterval(() => pollCandles(symbol, interval), POLL_INTERVAL);
@@ -69,6 +100,42 @@ function trackSymbol(symbol, interval) {
 }
 
 const app = express();
+
+// endpoints adicionais para dados de mercado centralizados
+app.get('/price', async (req, res) => {
+    const { symbol } = req.query;
+    if (!symbol) return res.status(400).send('symbol é obrigatório');
+    let p;
+    try {
+        if (useRedis) {
+            p = await redisClient.hGet('prices', symbol);
+        }
+        if (!p) p = priceStore.get(symbol);
+        if (p === undefined || p === null) return res.status(404).send('preço não disponível');
+        res.json({ price: parseFloat(p) });
+    } catch (err) {
+        console.error('erro em /price', err.message || err);
+        res.status(500).send('erro interno');
+    }
+});
+
+app.get('/stats24h', async (req, res) => {
+    const { symbol } = req.query;
+    if (!symbol) return res.status(400).send('symbol é obrigatório');
+    let data;
+    try {
+        if (useRedis) {
+            const json = await redisClient.hGet('stats24h', symbol);
+            if (json) data = JSON.parse(json);
+        }
+        if (!data) data = statsStore.get(symbol);
+        if (!data) return res.status(404).send('stats vazio');
+        res.json(data);
+    } catch (err) {
+        console.error('erro em /stats24h', err.message || err);
+        res.status(500).send('erro interno');
+    }
+});
 
 app.get('/cache', async (req, res) => {
     const { symbol, interval } = req.query;

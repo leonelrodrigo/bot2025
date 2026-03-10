@@ -1,10 +1,13 @@
 const Binance = require('binance-api-node').default;
-const DCAStrategy = require('./dcaStrategy.js');
+const fetch = global.fetch || require('node-fetch'); // usa fetch nativo se disponível, ou pacoteconst DCAStrategy = require('./dcaStrategy.js');
 const chalk = require('chalk');
 const updtRsi = require('./rsi.js');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
+
+// URL do cache server centralizado (onde RSI, preços e stats estarão)
+const CACHE_URL = process.env.CACHE_URL || `http://localhost:${process.env.CACHE_PORT || 4000}`;
 
 // ─────────────────────────────────────────────
 // Carrega configurações externas (config.json)
@@ -280,6 +283,19 @@ async function convertAssetToBase(asset, baseAsset) {
     if (asset === baseAsset) return 1;
 
     const tryPairPrice = async (pair) => {
+        // primeiro tenta obter via cache server (já mantém tickers em memória)
+        try {
+            const resp = await fetch(`${CACHE_URL}/price?symbol=${pair}`);
+            if (resp.ok) {
+                const json = await resp.json();
+                const p = parseFloat(json.price);
+                if (!isNaN(p) && p > 0) return p;
+            }
+        } catch (e) {
+            // continuar para fallback
+        }
+
+        // fallback: consulta direta ao cliente Binance local
         try {
             const res = await withRetry(() => client.prices({ symbol: pair }), [], 2, 300);
             if (res && res[pair]) return parseFloat(res[pair]);
@@ -674,19 +690,32 @@ fs.watchFile(CONFIG_PATH, { interval: 1500 }, (curr, prev) => {
 // Dados de Mercado
 // ─────────────────────────────────────────────
 
+// agora obtém candle através do cache server (mesmo endpoint usado para RSI)
 async function getLastCandle() {
     try {
-        const candles = await withRetry(() => client.candles({ symbol, interval: candleInterval, limit: 2 }), [], 3, 500);
-        return parseFloat(candles[0].close);
+        const resp = await fetch(`${CACHE_URL}/cache?symbol=${symbol}&interval=${candleInterval}`);
+        if (!resp.ok) {
+            console.warn('[getLastCandle] resposta não ok', resp.status);
+            return null;
+        }
+        const arr = await resp.json();
+        if (Array.isArray(arr) && arr.length > 0) {
+            return parseFloat(arr[arr.length - 1]);
+        }
     } catch (error) {
         console.error(`Erro ao obter candle de ${candleInterval}:`, error.message);
-        return null;
     }
+    return null;
 }
 
 async function update24hStats() {
     try {
-        const ticker = await withRetry(() => client.dailyStats({ symbol }), [], 3, 500);
+        const resp = await fetch(`${CACHE_URL}/stats24h?symbol=${symbol}`);
+        if (!resp.ok) {
+            console.warn('[update24hStats] resposta não ok', resp.status);
+            return;
+        }
+        const ticker = await resp.json();
         dailyLow = parseFloat(ticker.lowPrice);
         dailyHigh = parseFloat(ticker.highPrice);
     } catch (error) {
@@ -1371,11 +1400,19 @@ async function executeBuyStrategy() {
 
 async function monitor() {
     try {
-        const ticker = await withRetry(() => client.prices({ symbol }), [], 3, 500);
+        // buscar preço atual no cache server
+        const resp = await fetch(`${CACHE_URL}/price?symbol=${symbol}`);
+        if (resp.ok) {
+            const json = await resp.json();
+            currentPrice = parseFloat(json.price);
+        } else {
+            console.warn('[monitor] falha ao obter preço', resp.status);
+        }
         await update24hStats();
 
-        currentPrice = parseFloat(ticker[symbol]);
-        if (isNaN(currentPrice)) throw new Error('Preço atual inválido');
+        if (currentPrice === undefined || currentPrice === null || isNaN(currentPrice)) {
+            throw new Error('Preço atual inválido');
+        }
 
         const newCandleClose = await getLastCandle();
         if (newCandleClose) previousCandleClose = newCandleClose;
