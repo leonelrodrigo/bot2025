@@ -1,3 +1,8 @@
 node_modules/
 .env
 *.log
+
+# excluir dados gerados pelos bots
+/data/*_stats.json
+/data/stats_archives*/
+

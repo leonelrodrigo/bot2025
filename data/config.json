@@ -1,23 +1,28 @@
 {
   "_comentario": "Arquivo de configuração da estratégia do bot. Edite aqui sem mexer no código.",
   "modo": {
-    "demo": false,
+    "demo": true,
     "strategy": "SHORT",
     "tradeSide": "SELL",
     "base": "USDT",
     "moeda": "ETH"
   },
+  "operacao": {
+    "reinvestProfits": false,
+    "_comentario": "(base) mantém lucro em USDT; (moeda) converte para ETH; (equal) usa mesma quantidade da ordem anterior",
+    "reinvestMode": "equal"
+  },
   "dca": {
-    "enabled": true,
+    "enabled": false,
     "maxOrders": 3,
-    "targetPercent": 0.5,
+    "targetPercent": 0.25,
     "adaptiveStopLoss": true,
     "stopLossBuffer": 1.5,
     "profitConfig": {
-      "baseProfit": 0.5,
+      "baseProfit": 0.25,
       "extraOrderMultiplier": 1.2,
-      "minTotalProfit": 0.5,
-      "maxTotalProfit": 2.0,
+      "minTotalProfit": 0.25,
+      "maxTotalProfit": 1.0,
       "compoundProfits": false
     }
   },
@@ -32,30 +37,35 @@
     "rsiPeriod": 14
   },
   "rsi": {
+    "_comentario_": "Desabilitar o RSI definindo rsiBuy=0 e rsiSell=100",
+    "_comentario_rsiBuy": "RSI para compra, somente abaixo deste valor o bot irá comprar",
+    "_comentario_rsiSell": "RSI para venda, somente acima deste valor o bot irá vender",
     "rsiBuy": 60,
-    "rsiSell": 50
+    "rsiSell": 45
   },
   "alvos": {
-    "alvoSell": 0.5,
-    "alvoBuy": 0.5
+    "alvoSell": 0.25,
+    "alvoBuy": 0.25
   },
   "seguranca": {
-    "_comentario_secureTrend": 0,
-    "_comentario_secureLow": 1,
-    "_comentario_secureHigh": 1,
-    "secureTrend": 2.0,
-    "secureLow": 1.01,
+    "_comentario_secureTrend": "Fator de segurança para a tendência do RSI.",
+    "_comentario_secureLow": "Fator de segurança para o limite inferior do RSI.",
+    "_comentario_secureHigh": "Fator de segurança para o limite superior do RSI.",
+    "secureTrend": 1.0,
+    "_comentario_secure_": "1.00 = sem segurança extra; 1.02 = 2% mais conservador, etc.",
+    "secureLow": 1.02,
     "secureHigh": 1.01,
-    "stopLossPercentLong": 0,
-    "stopLossPercentShort": 0,
+    "stopLossPercentLong": 0.5,
+    "stopLossPercentShort": 0.5,
+    "_comentario_pct_": "1.0 = 100% da posição; 0.5 = 50% da posição, etc.",
     "pctCompra": 1.0,
     "pctVenda": 1.0,
-    "pctBaseLong": 0.5,
-    "pctMoedaShort": 0.5
+    "pctBaseLong": 1.0,
+    "pctMoedaShort": 0.25
   },
   "demo_saldo_inicial": {
     "_comentario": "Saldo simulado inicial usado quando demo=true",
-    "USDT": 100.0,
-    "moeda": 0.0
+    "base": 0.0,
+    "moeda": 0.024
   }
 }

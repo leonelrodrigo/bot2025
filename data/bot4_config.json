@@ -1,9 +1,9 @@
 {
   "_comentario": "Arquivo de configuração da estratégia do bot. Edite aqui sem mexer no código.",
   "modo": {
-    "demo": false,
-    "strategy": "SHORT",
-    "tradeSide": "SELL",
+    "demo": true,
+    "strategy": "LONG",
+    "tradeSide": "BUY",
     "base": "USDT",
     "moeda": "ETH"
   },
@@ -13,7 +13,7 @@
     "reinvestMode": "equal"
   },
   "dca": {
-    "enabled": true,
+    "enabled": false,
     "maxOrders": 3,
     "targetPercent": 0.25,
     "adaptiveStopLoss": true,
@@ -32,15 +32,16 @@
     "limit": 0.0005
   },
   "timing": {
-    "monitoringInterval": 15000,
-    "candleInterval": "15m",
+    "monitoringInterval": 30000,
+    "candleInterval": "5m",
     "rsiPeriod": 14
   },
   "rsi": {
+    "_comentario_": "Desabilitar o RSI definindo rsiBuy=0 e rsiSell=100",
     "_comentario_rsiBuy": "RSI para compra, somente abaixo deste valor o bot irá comprar",
     "_comentario_rsiSell": "RSI para venda, somente acima deste valor o bot irá vender",
-    "rsiBuy": 60,
-    "rsiSell": 45
+    "rsiBuy": 70,
+    "rsiSell": 30
   },
   "alvos": {
     "alvoSell": 0.25,
@@ -51,10 +52,12 @@
     "_comentario_secureLow": "Fator de segurança para o limite inferior do RSI.",
     "_comentario_secureHigh": "Fator de segurança para o limite superior do RSI.",
     "secureTrend": 1.0,
+    "_comentario_secure_": "1.00 = sem segurança extra; 1.02 = 2% mais conservador, etc.",
     "secureLow": 1.02,
     "secureHigh": 1.01,
     "stopLossPercentLong": 0.5,
     "stopLossPercentShort": 0.5,
+    "_comentario_pct_": "1.0 = 100% da posição; 0.5 = 50% da posição, etc.",
     "pctCompra": 1.0,
     "pctVenda": 1.0,
     "pctBaseLong": 1.0,
@@ -62,7 +65,7 @@
   },
   "demo_saldo_inicial": {
     "_comentario": "Saldo simulado inicial usado quando demo=true",
-    "base": 0.0,
+    "base": 100.0,
     "moeda": 0.024
   }
 }

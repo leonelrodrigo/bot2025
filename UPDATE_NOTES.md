@@ -76,6 +76,14 @@ A evolução centralizou os dados de mercado em um servidor único (`cacheServer
 
 ---
 
+## Mudanças adicionais
+
+- `TradeBot.js` agora garante que o diretório `data/` seja recriado sempre que necessário (ao carregar ou salvar stats), evitando erros caso alguém o delete enquanto o processo está rodando.
+- Implementado parâmetro de linha de comando `--remove-id=<bot>` que apaga configuração, arquivo de stats e pasta de arquivo do bot especificado e sai imediatamente.
+- Novos comandos oferecidos: `--list-bots` para listar todos os IDs existentes, `--backup-id=<bot>` para copiar arquivos e pastas daquele bot para um diretório de backup, e `--reset-id=<bot>` para zerar apenas os stats do bot especificado.
+- Quando um bot é invocado (`--id=<x>`) e não há arquivo de configuração correspondente, o sistema agora gera um esqueleto de `config.json` e `stats.json` dentro de `data/` e termina, solicitando que o usuário edite antes de reiniciar. Se existir um `data/config.json` ou `data/stats.json` base, eles são copiados como modelo, garantindo que os novos arquivos tenham todos os campos atuais.
+- A leitura de `demo_saldo_inicial` agora tenta usar a chave correspondente à `cfg.modo.base`, caindo para `USDT` por compatibilidade.
+
 ## Próximas melhorias sugeridas
 
 - Adicionar métricas (Prometheus/StatsD) no cache server para monitorar latência e tamanho dos caches.

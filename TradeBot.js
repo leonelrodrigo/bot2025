@@ -27,7 +27,102 @@ async function fetchCache(path, params = {}) {
 // ─────────────────────────────────────────────
 
 // Identificador opcional para instâncias paralelas. Pode vir de env var ou argumento CLI `--id=...`.
-const BOT_ID = (() => {
+// também aceitamos `--remove-id=...` para apagar todos os artefatos de um bot e sair
+// `--list-bots` lista todos os IDs detectados
+// `--backup-id=...` copia arquivos e pastas do bot para um diretório de backup
+let BOT_ID = '';
+// definimos DATA_DIR cedo para permitir os comandos acima
+const DATA_DIR = path.join(__dirname, 'data');
+function ensureDataDir() {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+ensureDataDir();
+
+// helper para cópia recursiva de diretório
+function copyDir(src, dest) {
+    if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+    for (const ent of entries) {
+        const srcPath = path.join(src, ent.name);
+        const destPath = path.join(dest, ent.name);
+        if (ent.isDirectory()) {
+            copyDir(srcPath, destPath);
+        } else {
+            fs.copyFileSync(srcPath, destPath);
+        }
+    }
+}
+
+const listArg = process.argv.includes('--list-bots');
+if (listArg) {
+    ensureDataDir();
+    const entries = fs.readdirSync(DATA_DIR);
+    const ids = new Set();
+    entries.forEach(fn => {
+        const m = fn.match(/^(.*)_(config|stats)\.json$/);
+        if (m) ids.add(m[1]);
+    });
+    if (entries.includes('config.json') || entries.includes('stats.json')) ids.add('');
+    console.log('Bots encontrados:');
+    ids.forEach(id => console.log(id || '(default)'));
+    process.exit(0);
+}
+
+const backupArg = process.argv.find(a => a.startsWith('--backup-id='));
+if (backupArg) {
+    const id = backupArg.split('=')[1];
+    ensureDataDir();
+    const destDir = path.join(DATA_DIR, `backup_${id || 'default'}_${Date.now()}`);
+    fs.mkdirSync(destDir, { recursive: true });
+    const names = [];
+    names.push(id ? `${id}_config.json` : 'config.json');
+    names.push(id ? `${id}_stats.json` : 'stats.json');
+    names.push(id ? `stats_archives_${id}` : 'stats_archives');
+    names.forEach(name => {
+        const src = path.join(DATA_DIR, name);
+        if (fs.existsSync(src)) {
+            const stat = fs.statSync(src);
+            if (stat.isDirectory()) {
+                copyDir(src, path.join(destDir, name));
+            } else {
+                fs.copyFileSync(src, path.join(destDir, name));
+            }
+        }
+    });
+    console.log(`🗃️  Backup do bot '${id}' salvo em ${destDir}`);
+    process.exit(0);
+}
+
+const resetArg = process.argv.find(a => a.startsWith('--reset-id='));
+if (resetArg) {
+    const idToReset = resetArg.split('=')[1];
+    const statsFile = path.join(DATA_DIR, idToReset ? `${idToReset}_stats.json` : 'stats.json');
+    if (fs.existsSync(statsFile)) {
+        fs.writeFileSync(statsFile, JSON.stringify(defaultStats(), null, 2), 'utf8');
+        console.log(`🔄 Stats do bot '${idToReset}' resetados.`);
+    } else {
+        console.warn(`Stats para bot '${idToReset}' não encontrados.`);
+    }
+    process.exit(0);
+}
+
+const removeArg = process.argv.find(a => a.startsWith('--remove-id='));
+if (removeArg) {
+    const idToRemove = removeArg.split('=')[1];
+    const cfgFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_config.json` : 'config.json');
+    const statsFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_stats.json` : 'stats.json');
+    const archiveDir = path.join(DATA_DIR, idToRemove ? `stats_archives_${idToRemove}` : 'stats_archives');
+    [cfgFile, statsFile].forEach(f => {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+    });
+    if (fs.existsSync(archiveDir)) {
+        fs.rmSync(archiveDir, { recursive: true, force: true });
+    }
+    console.log(`🗑️  Dados do bot '${idToRemove}' removidos.`);
+    process.exit(0);
+}
+
+BOT_ID = (() => {
     // prioridade: argumento CLI --id=foo
     const arg = process.argv.find(a => a.startsWith('--id='));
     if (arg) return arg.split('=')[1];
@@ -38,12 +133,47 @@ const BOT_ID = (() => {
 const CONFIG_FILENAME = BOT_ID ? `${BOT_ID}_config.json` : 'config.json';
 const STATS_FILENAME = BOT_ID ? `${BOT_ID}_stats.json` : 'stats.json';
 
-// armazenar configs e estatísticas em subpasta para preservar raiz limpa
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
-
+// if bot is referenced but its config doesn't exist yet, bootstrap skeleton files and exit
 const CONFIG_PATH = path.join(DATA_DIR, CONFIG_FILENAME);
 const STATS_PATH = path.join(DATA_DIR, STATS_FILENAME);
+if (!fs.existsSync(CONFIG_PATH)) {
+    // se existir um config base sem id, use como modelo
+    const baseConfig = path.join(DATA_DIR, 'config.json');
+    if (fs.existsSync(baseConfig)) {
+        fs.copyFileSync(baseConfig, CONFIG_PATH);
+    } else {
+        const template = {
+            modo: {
+                demo: true,
+                base: "USDT",
+                moeda: "ETH",
+                strategy: "LONG",
+                tradeSide: "BUY"
+            },
+            taxas: { market: 0.001, limit: 0.0005 },
+            timing: { monitoringInterval: 30000, candleInterval: "15m", rsiPeriod: 14 },
+            rsi: { rsiBuy: 30, rsiSell: 70 },
+            alvos: { alvoBuy: 0, alvoSell: 0 },
+            seguranca: { secureTrend: 0, secureLow: 0, secureHigh: 0, stopLossPercentLong: 0, stopLossPercentShort: 0 },
+            demo_saldo_inicial: {
+                "base": 0.0,
+                moeda: 0.0
+            }
+        };
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(template, null, 2), 'utf8');
+    }
+    // stats similar: use existing base stats if present
+    const baseStats = path.join(DATA_DIR, 'stats.json');
+    if (fs.existsSync(baseStats)) {
+        fs.copyFileSync(baseStats, STATS_PATH);
+    } else {
+        fs.writeFileSync(STATS_PATH, JSON.stringify(defaultStats(), null, 2), 'utf8');
+    }
+    console.log(chalk.yellow(`🛠️  Configuração inicial criada em ${CONFIG_PATH}`));
+    console.log(chalk.yellow(`Edite o arquivo e execute novamente para iniciar o bot.`));
+    process.exit(0);
+}
+
 
 function loadConfig() {
     try {
@@ -57,6 +187,7 @@ function loadConfig() {
 
 function loadStats() {
     try {
+        ensureDataDir();
         const raw = fs.readFileSync(STATS_PATH, 'utf8');
         return JSON.parse(raw);
     } catch (e) {
@@ -99,6 +230,8 @@ function archiveStats(statsObj) {
 
 function saveStats(stats) {
     try {
+        // garantir que a pasta de dados exista caso tenha sido removida durante execução
+        ensureDataDir();
         fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), 'utf8');
     } catch (e) {
         console.error(`⚠️ Erro ao salvar ${STATS_FILENAME}:`, e.message);
@@ -413,7 +546,8 @@ function getEqualQty(side) {
 // ─────────────────────────────────────────────
 
 let demoBalance = {
-    base: cfg.demo_saldo_inicial.USDT,
+    // tenta usar a moeda base declarada no cfg; mantém compatibilidade com EUA antiga (USDT)
+    base: cfg.demo_saldo_inicial[cfg.modo.base] ?? cfg.demo_saldo_inicial.USDT ?? 0,
     moeda: cfg.demo_saldo_inicial.moeda,
 };
 
@@ -716,6 +850,12 @@ async function getLastCandle() {
         }
         const arr = await resp.json();
         if (Array.isArray(arr) && arr.length > 0) {
+            // O último elemento pode corresponder à vela em andamento (precio atual).
+            // Para variação usamos a vela ADIANTE, portanto preferimos o penúltimo valor quando houver.
+            if (arr.length >= 2) {
+                return parseFloat(arr[arr.length - 2]);
+            }
+            // fallback, única vela disponível
             return parseFloat(arr[arr.length - 1]);
         }
     } catch (error) {
@@ -1261,6 +1401,20 @@ async function executeSellStrategy() {
     trend = secureTrend === 0 ? true : (trendPct !== null && trendPct <= secureTrend);
 
     if (tradeSide === 'SELL' && (rsi >= rsiSell || rsiSell === 0)) {
+        // log waiting conditions for LONG strategy closing position
+        if (strategy === 'LONG') {
+            const okVariacao = changePercentage >= alvoSell;
+            const okTrend = trend;
+            const okLowFilter = aboveDailyLow;
+            if (!okVariacao || !okTrend || !okLowFilter) {
+                console.log(chalk.gray(
+                    `[SELL] Aguardando condições → ` +
+                    `Variação: ${changePercentage.toFixed(3)}% (alvo ≥ ${alvoSell}%) ${okVariacao ? '✅' : '❌'} | ` +
+                    `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% > ${secureTrend}%)`} | ` +
+                    `SecureLow: ${okLowFilter ? '✅' : '❌'}`
+                ));
+            }
+        }
         if (changePercentage >= alvoSell && trend && aboveDailyLow) {
 
             await balanceUpdt();
@@ -1353,7 +1507,7 @@ async function executeBuyStrategy() {
         : null;
     trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
 
-    if (tradeSide === 'BUY' && (rsi <= rsiBuy || rsiBuy === 0)) {
+    if (tradeSide === 'BUY' && strategy === 'SHORT' && (rsi <= rsiBuy || rsiBuy === 0)) {
         const okVariacao = changePercentage <= -alvoBuy;
         const okTrend = trend;
         const okHighFilter = belowDailyHigh;

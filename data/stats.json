@@ -1,8 +1,8 @@
 {
   "sessao": {
-    "inicio": "",
-    "modo": "DEMO",
-    "symbol": "ETHUSDT"
+    "inicio": null,
+    "modo": null,
+    "symbol": null
   },
   "trades": {
     "total": 0,
@@ -17,6 +17,7 @@
     "maiorPrejuizoTrade": 0,
     "saldoInicialBase": 0,
     "saldoAtualBase": 0,
+    "saldoInicialMoeda": 0,
     "saldoAtualMoeda": 0
   },
   "historico": []

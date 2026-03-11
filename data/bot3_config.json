@@ -32,7 +32,7 @@
     "limit": 0.0005
   },
   "timing": {
-    "monitoringInterval": 60000,
+    "monitoringInterval": 15000,
     "candleInterval": "5m",
     "rsiPeriod": 14
   },
@@ -60,7 +60,7 @@
   },
   "demo_saldo_inicial": {
     "_comentario": "Saldo simulado inicial usado quando demo=true",
-    "USDT": 0.0,
+    "base": 0.0,
     "moeda": 0.022
   }
 }
