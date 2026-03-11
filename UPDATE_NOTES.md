@@ -49,6 +49,9 @@ A evolução centralizou os dados de mercado em um servidor único (`cacheServer
 - Remoção de preços zero vindos do WS através de filtro na assinatura.
 - Throttle de logs inválidos para um por minuto por par.
 - Várias melhorias de tratamento de erro, mensagens explicativas e fallback.
+- DCA agora evita acionar ordens extras após atingir o número máximo configurado; tanto o cálculo de quantidade quanto a verificação de movimento contrário respeitam esse limite.
+- Reinvest equal corrige lado usado: a quantidade igual agora é baseada no último **contrário** (BUY→SELL, SELL→BUY) em vez de no mesmo lado. Isso faz com que `reinvestMode='equal'` retorne a quantidade correta ao reentrar na posição.
+- Reinvest modo "moeda" agora converte o lucro em moeda imediatamente quando a posição é fechada. O `profitBankBase` não é mais usado nesse modo, e nenhum ajuste especial ocorre durante vendas; a recompra será refletida no próximo BUY ou diretamente no saldo quando em DEMO.
 
 ---
 

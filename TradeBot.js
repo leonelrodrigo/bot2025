@@ -304,17 +304,9 @@ let profitBankBase = 0;
 
 // helpers para balances que consideram reinvestimento
 function getEffectiveBalanceQty(currentPrice) {
+    // quantidade disponível sem incluir lucros a reinvestir em base;
+    // lucros em 'moeda' já são convertidos imediatamente em accumulateProfit
     let qty = balanceQty;
-    if (cfg.operacao.reinvestProfits && cfg.operacao.reinvestMode === 'moeda' && profitBankBase > 0 && currentPrice) {
-        const extra = profitBankBase / currentPrice;
-        qty += extra;
-        if (DEMO) {
-            // simulamos a conversão imediata no saldo DEMO
-            demoBalance.moeda += extra;
-            demoBalance.base = Math.max(0, demoBalance.base - profitBankBase);
-        }
-        profitBankBase = 0;
-    }
     return qty;
 }
 
@@ -330,11 +322,24 @@ function getEffectiveBalanceAmt(currentPrice) {
     return amt;
 }
 
-// função chamada após um trade fechado para acumular lucro no banco
+// função chamada após um trade fechado para acumular lucro ou convertê‑lo
 function accumulateProfit(lucroBase) {
     if (lucroBase > 0 && cfg.operacao.reinvestProfits) {
-        profitBankBase += lucroBase;
-        console.log(chalk.magenta(`[REINVEST] lucro de ${lucroBase.toFixed(8)} ${base} adicionado ao banco`));
+        if (cfg.operacao.reinvestMode === 'moeda' && currentPrice && !isNaN(currentPrice) && currentPrice > 0) {
+            const extra = lucroBase / currentPrice;
+            // adiciona imediatamente ao saldo de moeda
+            if (DEMO) {
+                demoBalance.moeda += extra;
+                demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
+            } else {
+                balanceQty += extra;
+            }
+            console.log(chalk.magenta(`[REINVEST] lucro de ${lucroBase.toFixed(8)} ${base} convertido em ${extra.toFixed(8)} ${moeda}`));
+        } else {
+            // modo base ou equal (ou não há preço válido para converter)
+            profitBankBase += lucroBase;
+            console.log(chalk.magenta(`[REINVEST] lucro de ${lucroBase.toFixed(8)} ${base} adicionado ao banco`));
+        }
     }
 }
 
@@ -1423,7 +1428,7 @@ async function executeSellStrategy() {
             let quantity;
             if (cfg.operacao.reinvestMode === 'equal') {
                 // reopen with same volume as last opposite trade when available
-                quantity = getEqualQty('SELL') || Math.max(getEffectiveBalanceQty(currentPrice) * (strategy === 'SHORT' ? pctMoedaShort : pctVenda), minQty);
+                quantity = getEqualQty('BUY') || Math.max(getEffectiveBalanceQty(currentPrice) * (strategy === 'SHORT' ? pctMoedaShort : pctVenda), minQty);
                 console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
             } else if (strategy === 'SHORT') {
                 const effectiveQty = getEffectiveBalanceQty(currentPrice);
@@ -1531,7 +1536,7 @@ async function executeBuyStrategy() {
 
             if (cfg.operacao.reinvestMode === 'equal') {
                 // use accumulated opposite-side quantity
-                quantity = getEqualQty('BUY');
+                quantity = getEqualQty('SELL');
                 if (!(quantity > 0)) {
                     if (strategy === 'SHORT') {
                         const amountSell = sellAmount || getEffectiveBalanceQty(currentPrice) * sellPrice;
@@ -1715,14 +1720,14 @@ async function monitor() {
 
     function logTS(msg) {
         const d = new Date();
-        const pad = n => String(n).padStart(2,'0');
+        const pad = n => String(n).padStart(2, '0');
         const ts = `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
         console.log(`${ts} ${msg}`);
     }
 
     // wrap monitor to log timestamp only at start
     const originalMonitor = monitor;
-    monitor = async function() {
+    monitor = async function () {
         logTS('início de monitor');
         await originalMonitor();
     };

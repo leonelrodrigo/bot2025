@@ -288,6 +288,9 @@ class DCAStrategy {
      */
     calculateNextOrderQuantity(currentPrice, availableBalance, minQty) {
         if (!this.isActive) return 0;
+        // evitar cálculo se não há ordens extras restantes
+        const extrasUsed = this.ordersCount - 1;
+        if (extrasUsed >= this.maxExtraOrders) return 0;
 
         // Base quantity from first order
         const baseQuantity = this.positions[0]?.quantity || 0;
@@ -390,6 +393,12 @@ class DCAStrategy {
      */
     checkContraryMove(currentPrice) {
         if (!this.isActive || !this.lastActionPrice) return false;
+        // não insere nova ordem se já atingimos máximo de extras
+        const extrasUsed = this.ordersCount - 1;
+        if (extrasUsed >= this.maxExtraOrders) {
+            //console.log(chalk.yellow('⚠️ DCA: máximo de ordens extras atingido, não há movimento contrário')); // opcional
+            return false;
+        }
 
         const movePercent = ((currentPrice - this.lastActionPrice) / this.lastActionPrice) * 100;
 

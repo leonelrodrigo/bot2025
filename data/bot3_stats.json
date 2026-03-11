@@ -5,20 +5,20 @@
     "symbol": "ETHUSDT"
   },
   "trades": {
-    "total": 3,
-    "lucrativos": 3,
+    "total": 5,
+    "lucrativos": 5,
     "prejuizo": 0,
     "stopLossAcionados": 0
   },
   "financeiro": {
-    "lucroLiquidoTotal": 0.06882045,
-    "taxasTotais": 0.06817055,
+    "lucroLiquidoTotal": 0.09349624,
+    "taxasTotais": 0.08998876,
     "maiorLucroTrade": 0.04170655,
     "maiorPrejuizoTrade": 0,
     "saldoInicialBase": 0,
-    "saldoAtualBase": 0.23741973,
+    "saldoAtualBase": 0.1869675,
     "saldoInicialMoeda": 0.022,
-    "saldoAtualMoeda": 0.02181334
+    "saldoAtualMoeda": 0.02183965
   },
   "historico": [
     {
@@ -63,6 +63,36 @@
       "feeEstimated": false,
       "lucroLiquido": 0.04170655,
       "lucroPct": "0.101%",
+      "stopLoss": false,
+      "modo": "DEMO"
+    },
+    {
+      "timestamp": "2026-03-11T06:45:21.778Z",
+      "strategy": "SHORT",
+      "side": "BUY",
+      "entryPrice": 2024.0199999999998,
+      "exitPrice": 2019.86,
+      "qty": 0.0054,
+      "taxaTotal": 0.01090724,
+      "feePaidBase": 0.01090724,
+      "feeEstimated": false,
+      "lucroLiquido": 0.01155676,
+      "lucroPct": "0.106%",
+      "stopLoss": false,
+      "modo": "DEMO"
+    },
+    {
+      "timestamp": "2026-03-11T07:16:51.801Z",
+      "strategy": "SHORT",
+      "side": "BUY",
+      "entryPrice": 2025,
+      "exitPrice": 2020.55,
+      "qty": 0.0054,
+      "taxaTotal": 0.01091097,
+      "feePaidBase": 0.01091097,
+      "feeEstimated": false,
+      "lucroLiquido": 0.01311903,
+      "lucroPct": "0.120%",
       "stopLoss": false,
       "modo": "DEMO"
     }
