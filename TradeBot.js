@@ -1359,7 +1359,8 @@ async function executeSellStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra SHORT: quantidade calculada ${quantity.toFixed(8)}`));
-                const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false para adicionar posição
+                // sinalizar que esta ordem é parte da estratégia DCA para evitar duplicações
+                const order = await createOrder('SELL', quantity, true, false); // isDCAOrder=true
                 if (order) {
                     // atualiza estado DCA independentemente de checkContraryMove interno
                     try {
@@ -1467,7 +1468,8 @@ async function executeBuyStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra LONG: quantidade calculada ${quantity.toFixed(8)}`));
-                const order = await createOrder('BUY', quantity, false, false);
+                // indicar que esta ordem é de DCA para evitar dupla execução
+                const order = await createOrder('BUY', quantity, true, false);
                 if (order) {
                     try {
                         const execQty = parseFloat(order.executedQty);
