@@ -1,7 +1,7 @@
 {
   "_comentario": "Arquivo de configuração da estratégia do bot. Edite aqui sem mexer no código.",
   "modo": {
-    "demo": false,
+    "demo": true,
     "strategy": "SHORT",
     "tradeSide": "SELL",
     "base": "USDT",

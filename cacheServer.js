@@ -36,11 +36,22 @@ async function createRedis() {
     try {
         redisClient = redis.createClient({
             url: REDIS_URL,
-            socket: { reconnectStrategy: () => false }
+            socket: {
+                reconnectStrategy: (retries) => {
+                    // tentativas exponenciais até 10s
+                    return Math.min(retries * 100, 10000);
+                }
+            }
         });
         redisClient.on('error', err => {
             if (useRedis) console.error('Redis error', err.code || err.message || err);
             useRedis = false;
+            scheduleRedisReconnect();
+        });
+        redisClient.on('end', () => {
+            console.warn('Redis connection closed');
+            useRedis = false;
+            scheduleRedisReconnect();
         });
         await redisClient.connect();
         useRedis = true;
@@ -48,7 +59,19 @@ async function createRedis() {
     } catch (err) {
         console.warn(`⚠️ Não foi possível conectar ao Redis (${REDIS_URL}), usando cache em memória:`, err.code || err.message || err);
         useRedis = false;
+        scheduleRedisReconnect();
     }
+}
+
+function scheduleRedisReconnect() {
+    setTimeout(() => {
+        if (!useRedis) {
+            console.log('🔄 Tentando reconectar ao Redis...');
+            createRedis().catch(e => {
+                console.warn('Reconexão falhou:', e.message || e);
+            });
+        }
+    }, 5000);
 }
 
 async function pollCandles(symbol, interval) {
@@ -98,7 +121,7 @@ function subscribePrice(symbol) {
             const prev = lastInvalidLogTs.get(symbol) || 0;
             if (now - prev > INVALID_LOG_THROTTLE_MS) {
                 // log raw ticker payload for sniffing
-                const ts = (() => { const d=new Date(),pad=n=>String(n).padStart(2,'0'); return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;})();
+                const ts = (() => { const d = new Date(), pad = n => String(n).padStart(2, '0'); return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`; })();
                 console.log(`${ts} ticker WS para ${symbol} veio com preço inválido (${p}), payload: ${JSON.stringify(ticker)}`);
                 lastInvalidLogTs.set(symbol, now);
             }
@@ -126,7 +149,7 @@ async function trackSymbol(symbol, interval) {
 
     const ts = (() => {
         const d = new Date();
-        const pad = n => String(n).padStart(2,'0');
+        const pad = n => String(n).padStart(2, '0');
         return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
     })();
     console.log(`${ts} trackSymbol chamado para ${symbol}@${interval}`);
@@ -147,7 +170,7 @@ async function trackSymbol(symbol, interval) {
 async function pollPriceOnce(symbol) {
     const ts = (() => {
         const d = new Date();
-        const pad = n => String(n).padStart(2,'0');
+        const pad = n => String(n).padStart(2, '0');
         return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
     })();
     try {
@@ -171,7 +194,7 @@ const app = express();
 app.get('/price', async (req, res) => {
     const ts = (() => {
         const d = new Date();
-        const pad = n => String(n).padStart(2,'0');
+        const pad = n => String(n).padStart(2, '0');
         return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
     })();
     const { symbol } = req.query;
@@ -249,13 +272,25 @@ app.get('/cache', async (req, res) => {
     try {
         let data;
         if (useRedis) {
-            data = await redisClient.get(key);
+            try {
+                data = await redisClient.get(key);
+            } catch (e) {
+                console.warn('Redis get falhou:', e.message || e);
+                useRedis = false;
+                data = null;
+            }
             if (!data) data = inMemoryStore.get(key);
         } else {
             data = inMemoryStore.get(key);
         }
         if (!data) return res.status(404).send('cache vazio');
-        res.json(JSON.parse(data));
+        try {
+            res.json(JSON.parse(data));
+        } catch (e) {
+            console.warn('JSON inválido lido do cache:', e.message || e, '->', data);
+            // ignora valor corrompido e devolve 404
+            return res.status(404).send('cache vazio');
+        }
     } catch (err) {
         console.error('erro ao ler cache:', err.message || err);
         res.status(500).send('erro ao ler cache');
