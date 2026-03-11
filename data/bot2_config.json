@@ -32,8 +32,8 @@
     "limit": 0.0005
   },
   "timing": {
-    "monitoringInterval": 15000,
-    "candleInterval": "15m",
+    "monitoringInterval": 30000,
+    "candleInterval": "5m",
     "rsiPeriod": 14
   },
   "rsi": {
