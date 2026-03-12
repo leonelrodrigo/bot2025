@@ -552,7 +552,7 @@ function getEqualQty(side) {
 
 let demoBalance = {
     // tenta usar a moeda base declarada no cfg; mantém compatibilidade com EUA antiga (USDT)
-    base: cfg.demo_saldo_inicial[cfg.modo.base] ?? cfg.demo_saldo_inicial.USDT ?? 0,
+    base: cfg.demo_saldo_inicial[cfg.modo.base] ?? cfg.demo_saldo_inicial.base ?? 0,
     moeda: cfg.demo_saldo_inicial.moeda,
 };
 
@@ -1359,17 +1359,8 @@ async function executeSellStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra SHORT: quantidade calculada ${quantity.toFixed(8)}`));
-                const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false para adicionar posição
+                const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
-                    // atualiza estado DCA independentemente de checkContraryMove interno
-                    try {
-                        const execQty = parseFloat(order.executedQty);
-                        const execQuote = parseFloat(order.cummulativeQuoteQty);
-                        const avgPrice = execQuote / execQty;
-                        dcaStrategy.addPosition(avgPrice, execQty, execQuote, true);
-                    } catch (e) {
-                        console.warn('Erro ao atualizar DCA após ordem extra:', e.message || e);
-                    }
                     console.log(chalk.green(`✅ DCA extra vendido: ${quantity} ${moeda}`));
                 }
             }
@@ -1400,10 +1391,17 @@ async function executeSellStrategy() {
     }
 
     // tendência sempre comparada com a vela anterior, não com o preço de entrada
+    // SHORT: quer vender quando sobe → trend = preço subindo (trendPct <= secureTrend = sem queda excessiva)
+    // LONG:  quer vender quando subiu → trend = preço ainda subindo (trendPct >= -secureTrend)
     const trendPct = previousCandleClose
         ? ((currentPrice - previousCandleClose) / previousCandleClose) * 100
         : null;
-    trend = secureTrend === 0 ? true : (trendPct !== null && trendPct <= secureTrend);
+    if (strategy === 'SHORT') {
+        trend = secureTrend === 0 ? true : (trendPct !== null && trendPct <= secureTrend);
+    } else {
+        // LONG: confirma que o preço não está caindo além do threshold
+        trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
+    }
 
     if (tradeSide === 'SELL' && (rsi >= rsiSell || rsiSell === 0)) {
         // log waiting conditions for LONG strategy closing position
@@ -1467,16 +1465,8 @@ async function executeBuyStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra LONG: quantidade calculada ${quantity.toFixed(8)}`));
-                const order = await createOrder('BUY', quantity, false, false);
+                const order = await createOrder('BUY', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
-                    try {
-                        const execQty = parseFloat(order.executedQty);
-                        const execQuote = parseFloat(order.cummulativeQuoteQty);
-                        const avgPrice = execQuote / execQty;
-                        dcaStrategy.addPosition(avgPrice, execQty, execQuote, true);
-                    } catch (e) {
-                        console.warn('Erro ao atualizar DCA após ordem extra:', e.message || e);
-                    }
                     console.log(chalk.green(`✅ DCA extra comprado: ${quantity} ${moeda}`));
                 }
             }
@@ -1499,6 +1489,7 @@ async function executeBuyStrategy() {
         }
         changePercentage = ((currentPrice - sellPrice) / sellPrice) * 100;
     } else {
+        // LONG: entrada baseada na queda desde a vela anterior
         if (!previousCandleClose) {
             console.log(chalk.gray('[BUY] Aguardando previousCandleClose...'));
             return;
@@ -1507,11 +1498,63 @@ async function executeBuyStrategy() {
     }
 
     // tendência calculada sempre em relação à vela anterior
+    // SHORT: compra quando preço caiu suficiente → trend confirma que não está subindo (trendPct >= -secureTrend)
+    // LONG:  compra quando preço caiu suficiente → trend confirma que não está caindo demais (trendPct >= -secureTrend)
     const trendPct = previousCandleClose
         ? ((currentPrice - previousCandleClose) / previousCandleClose) * 100
         : null;
     trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
 
+    // ── Bloco de entrada LONG (simétrico inverso ao SELL do SHORT) ──
+    if (tradeSide === 'BUY' && strategy === 'LONG' && (rsi <= rsiBuy || rsiBuy === 0)) {
+        const okVariacao = changePercentage <= -alvoBuy;
+        const okTrend = trend;
+        const okHighFilter = belowDailyHigh;
+
+        /*
+        if (!okVariacao || !okTrend || !okHighFilter) {
+            console.log(chalk.gray(
+                `[BUY-LONG] Aguardando condições → ` +
+                `Variação: ${changePercentage.toFixed(3)}% (alvo ≤ -${alvoBuy}%) ${okVariacao ? '✅' : '❌'} | ` +
+                `Trend: ${okTrend ? '✅' : `❌ (${trendPct !== null ? trendPct.toFixed(3) : 'N/A'}% < -${secureTrend}%)`} | ` +
+                `SecureHigh: ${okHighFilter ? '✅' : '❌'}`
+            ));
+        }
+        */
+
+        if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
+            await balanceUpdt();
+            console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra LONG acionada`);
+
+            const minAmtQty = minAmt / currentPrice;
+            let quantity;
+
+            if (cfg.operacao.reinvestMode === 'equal') {
+                quantity = getEqualQty('SELL');
+                if (!(quantity > 0)) {
+                    const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
+                    quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
+                }
+                console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
+            } else {
+                const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
+                quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
+            }
+
+            const order = await createOrder('BUY', quantity, false, true);
+
+            if (order) {
+                tradeSide = 'SELL';
+                sellPrice = null;
+                sellAmount = null;
+                console.log(`✅ Compra LONG executada: ${quantity} ${moeda}`);
+                console.log('-----------------------------------');
+            }
+        }
+        return;
+    }
+
+    // ── Bloco de fechamento SHORT (BUY fecha posição SHORT) ──
     if (tradeSide === 'BUY' && strategy === 'SHORT' && (rsi <= rsiBuy || rsiBuy === 0)) {
         const okVariacao = changePercentage <= -alvoBuy;
         const okTrend = trend;
