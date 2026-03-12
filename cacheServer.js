@@ -317,9 +317,7 @@ app.get('/cache', async (req, res) => {
             res.json(JSON.parse(data));
         } catch (e) {
             console.warn('JSON inválido lido do cache:', e.message);
-            // log raw (stringify to show control chars)
-            console.warn('raw cache string:', JSON.stringify(data));
-            // remove chave corrupta para evitar reproduzir erro ad infinitum
+            // removemos chave corrompida para evitar a repetição do erro
             try {
                 if (useRedis) redisClient.del(key).catch(() => { });
             } catch (_) { }
