@@ -6,4 +6,5 @@ node_modules/
 /data/*_config.json
 /data/*_stats.json
 /data/stats_archives*/
+/data/step_cache.json
 

@@ -33,7 +33,7 @@ async function fetchCache(path, params = {}) {
 let BOT_ID = '';
 // definimos DATA_DIR cedo para permitir os comandos acima
 const DATA_DIR = path.join(__dirname, 'data');
-// arquivo local para cache de filtros (stepSize/minQty/minAmt)
+// arquivo local para cache de filtros por símbolo { symbol: { stepSize,minQty,minAmt } }
 const STEP_CACHE_PATH = path.join(DATA_DIR, 'step_cache.json');
 function ensureDataDir() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -41,18 +41,20 @@ function ensureDataDir() {
 ensureDataDir();
 
 // --- helpers para cache local de filtros ----------------------------------------------
+// retorna mapa (pode ser {} se nenhum arquivo)
 function loadStepCache() {
     try {
         if (fs.existsSync(STEP_CACHE_PATH)) {
             const raw = fs.readFileSync(STEP_CACHE_PATH, 'utf8');
-            return JSON.parse(raw);
+            return JSON.parse(raw) || {};
         }
     } catch (e) {
         console.warn('⚠️ falha ao ler cache de step size:', e.message);
     }
-    return null;
+    return {};
 }
 
+// salva mapa completo
 function saveStepCache(obj) {
     try {
         ensureDataDir();
@@ -722,14 +724,15 @@ function roundStepSize(quantity) {
 
 // Ajusta quantidade para respeitar LOT_SIZE (stepSize), minQty e minNotional (minAmt).
 function adjustQtyToFilters(requestQty, side) {
-    // se stepSize indefinido, tenta usar cache local e, se não existir, faz fallback simples
+    // se stepSize indefinido, tenta usar cache local por símbolo
     if (!stepSize || !currentPrice || !minAmt || !minQty) {
-        const cached = loadStepCache();
+        const allCached = loadStepCache();
+        const cached = allCached[symbol];
         if (cached && cached.stepSize) {
             stepSize = cached.stepSize;
             minQty = cached.minQty;
             minAmt = cached.minAmt;
-            console.log(chalk.yellow('[CACHE] usando filtros locais:',
+            console.log(chalk.yellow('[CACHE] usando filtros locais para', symbol, ':',
                 `stepSize=${stepSize}`, `minQty=${minQty}`, `minAmt=${minAmt}`));
             // continua com novos valores
         } else {
@@ -820,13 +823,14 @@ async function updateMinOrderQty() {
 
         // se ainda não temos dados, tentamos usar cache local gravado anteriormente
         if (!symbolInfo || !symbolInfo.symbol) {
-            const cached = loadStepCache();
+            const allCached = loadStepCache();
+            const cached = allCached[symbol];
             if (cached) {
                 stepSize = cached.stepSize;
                 minQty = cached.minQty;
                 minAmt = cached.minAmt;
-                console.log(chalk.yellow(`[CACHE] Usando filtros em cache local:` +
-                    ` stepSize=${stepSize} minQty=${minQty} minAmt=${minAmt}`));
+                console.log(chalk.yellow(`[CACHE] Usando filtros em cache local para ${symbol}: ` +
+                    `stepSize=${stepSize} minQty=${minQty} minAmt=${minAmt}`));
                 await balanceUpdt();
                 return;
             }
@@ -845,9 +849,11 @@ async function updateMinOrderQty() {
 
         minAmt = minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5;
 
-        // grava valores para usos futuros
+        // grava valores para usos futuros (sobrescreve só o symbol atual)
         if (stepSize !== null && minQty !== null) {
-            saveStepCache({ stepSize, minQty, minAmt });
+            const allCached = loadStepCache();
+            allCached[symbol] = { stepSize, minQty, minAmt };
+            saveStepCache(allCached);
         }
 
         await balanceUpdt();
