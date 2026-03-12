@@ -145,6 +145,8 @@ O arquivo `config.json` contém várias seções:
 
 ### `alvos`
 - `alvoBuy`, `alvoSell` (percentual)
+- `dca.targetPercent`: distância % entre ordens extras. É um valor em porcentagem, não decimal (0.25 = 0.25%).
+- Para `strategy: "LONG"` o bot **compra em dip**: a variação utilizada é negativa e deve ser ≤ -`alvoBuy`. Para `strategy: "SHORT"` o bot entra em queda para fechar a posição e comprime `alvoBuy` com sinal invertido.
 
 ### `seguranca`
 - `secureTrend`, `secureLow`, `secureHigh`

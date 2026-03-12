@@ -4,5 +4,6 @@ node_modules/
 
 # excluir dados gerados pelos bots
 /data/*_stats.json
+/data/*_config.json
 /data/stats_archives*/
 

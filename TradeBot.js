@@ -1469,13 +1469,14 @@ async function executeBuyStrategy() {
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra LONG: quantidade calculada ${quantity.toFixed(8)}`));
                 // indicar que esta ordem é de DCA para evitar dupla execução
+                const triggerPrice = currentPrice;
                 const order = await createOrder('BUY', quantity, true, false);
                 if (order) {
                     try {
                         const execQty = parseFloat(order.executedQty);
                         const execQuote = parseFloat(order.cummulativeQuoteQty);
                         const avgPrice = execQuote / execQty;
-                        dcaStrategy.addPosition(avgPrice, execQty, execQuote, true);
+                        dcaStrategy.addPosition(avgPrice, execQty, execQuote, true, triggerPrice);
                     } catch (e) {
                         console.warn('Erro ao atualizar DCA após ordem extra:', e.message || e);
                     }
@@ -1514,21 +1515,37 @@ async function executeBuyStrategy() {
         : null;
     trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
 
-    if (tradeSide === 'BUY' && strategy === 'SHORT' && (rsi <= rsiBuy || rsiBuy === 0)) {
-        const okVariacao = changePercentage <= -alvoBuy;
+    if (tradeSide === 'BUY' && (rsi <= rsiBuy || rsiBuy === 0)) {
+        // valid for closing SHORT *or* opening LONG depending on strategy
+        let okVariacao;
+        let variacaoLabel;
+        if (strategy === 'SHORT') {
+            okVariacao = changePercentage <= -alvoBuy;
+            variacaoLabel = `≤ -${alvoBuy}%`;
+        } else {
+            // para LONG compramos em queda (dip buy) em relação à vela anterior
+            okVariacao = changePercentage <= -alvoBuy;
+            variacaoLabel = `≤ -${alvoBuy}%`;
+        }
         const okTrend = trend;
         const okHighFilter = belowDailyHigh;
 
         if (!okVariacao || !okTrend || !okHighFilter) {
-            console.log(chalk.gray(
-                `[BUY] Aguardando condições → ` +
-                `Variação: ${changePercentage.toFixed(3)}% (alvo ≤ -${alvoBuy}%) ${okVariacao ? '✅' : '❌'} | ` +
-                `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% < -${secureTrend}%)`} | ` +
-                `SecureHigh: ${okHighFilter ? '✅' : '❌'}`
-            ));
+            // para LONG, quando ainda não existe posição (buyPrice null) estamos apenas
+            // observando condição de entrada; não queremos floodar o log com mensagens
+            // de "aguardando" nesse cenário. A mesma mensagem deve aparecer apenas quando
+            // fechamos um SHORT (strategy SHORT) ou quando LONG já possui posição aberta.
+            if (strategy === 'SHORT' || buyPrice !== null) {
+                console.log(chalk.gray(
+                    `[BUY] Aguardando condições → ` +
+                    `Variação: ${changePercentage.toFixed(3)}% (alvo ${variacaoLabel}) ${okVariacao ? '✅' : '❌'} | ` +
+                    `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% ${strategy === 'SHORT' ? '< -' : '<'}${secureTrend}%)`} | ` +
+                    `SecureHigh: ${okHighFilter ? '✅' : '❌'}`
+                ));
+            }
         }
 
-        if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
+        if (okVariacao && okTrend && belowDailyHigh) {
 
             await balanceUpdt();
             console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra acionada`);

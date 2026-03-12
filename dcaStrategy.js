@@ -169,7 +169,9 @@ class DCAStrategy {
     /**
      * Adiciona uma nova posição
      */
-    addPosition(price, quantity, amount, ignoreCheck = false) {
+    // adiciona nova posição; triggerPrice opcional permite garantir espaçamento
+    // mínimo com base no preço que disparou a decisão, não apenas no preço de execução.
+    addPosition(price, quantity, amount, ignoreCheck = false, triggerPrice = null) {
         if (!this.isActive) {
             console.log(chalk.yellow('⚠️ DCA: Estratégia não está ativa'));
             return null;
@@ -203,7 +205,28 @@ class DCAStrategy {
         this.totalValue = this.totalQuantity * price;
         this.averageEntryPrice = this.totalCost / this.totalQuantity;
         this.ordersCount++;
-        this.lastActionPrice = price;
+
+        // antes de ajustar lastActionPrice, vamos analisar o gap real entre o
+        // último preço registrado e o preço de execução desta ordem. Isso nos
+        // permite avisar se a execução ficou menor do que o target (slippage).
+        const previousPrice = this.lastActionPrice;
+        if (triggerPrice !== null) {
+            if (this.strategy === 'SHORT') {
+                this.lastActionPrice = Math.max(triggerPrice, price);
+            } else {
+                this.lastActionPrice = Math.min(triggerPrice, price);
+            }
+        } else {
+            this.lastActionPrice = price;
+        }
+
+        // diagnóstico de espaçamento
+        if (triggerPrice !== null && previousPrice) {
+            const gap = ((price - previousPrice) / previousPrice) * 100;
+            if (Math.abs(gap) < this.targetPercent) {
+                console.log(chalk.yellow(`⚠️ DCA: gap entre ordens ${gap.toFixed(3)}% menor que target ${this.targetPercent}% (prev=${previousPrice.toFixed(6)}, exec=${price.toFixed(6)}, trigger=${triggerPrice})`));
+            }
+        }
 
         // Recalcula lucros esperados
         const profits = this.calculateExpectedProfits();
@@ -401,14 +424,20 @@ class DCAStrategy {
         }
 
         const movePercent = ((currentPrice - this.lastActionPrice) / this.lastActionPrice) * 100;
-
+        let result;
         if (this.strategy === 'LONG') {
-            // Para LONG: movimento contrário = queda >= targetPercent
-            return movePercent <= -(this.targetPercent);
+            // Para LONG: movimento contrário = queda ≥ targetPercent
+            result = movePercent <= -(this.targetPercent);
         } else {
-            // Para SHORT: movimento contrário = alta >= targetPercent
-            return movePercent >= this.targetPercent;
+            // Para SHORT: movimento contrário = alta ≥ targetPercent
+            result = movePercent >= this.targetPercent;
         }
+        if (result) {
+            console.log(chalk.magenta(`📈 [DCA] triggerContra move=${movePercent.toFixed(3)}% ` +
+                `(last=${this.lastActionPrice.toFixed(6)}, cur=${currentPrice.toFixed(6)}, ` +
+                `target=${this.targetPercent}%)`));
+        }
+        return result;
     }
 
     /**
