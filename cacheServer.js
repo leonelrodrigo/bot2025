@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const Binance = require('binance-api-node').default;
 const redis = require('redis');
