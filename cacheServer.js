@@ -18,6 +18,12 @@ let redisClient = null;
 let useRedis = true;          // indicador se Redis está disponível
 const inMemoryStore = new Map(); // fallback se Redis cair
 
+// reconexão controlada
+let redisReconnectTimer = null;
+let redisReconnectDelay = 5000; // começa em 5s
+const REDIS_RECONNECT_MAX = 60000; // cap 1 minuto entre tentativas
+let redisReconnectCount = 0; // para logs de monitoramento
+
 // caches extras (preços e stats) para fornecer ao bot
 const priceStore = new Map();   // symbol -> lastPrice
 const statsStore = new Map();   // symbol -> { lowPrice, highPrice, ... }
@@ -47,6 +53,9 @@ async function createRedis() {
                 }
             }
         });
+        // remover listeners anteriores caso exista
+        redisClient.removeAllListeners('error');
+        redisClient.removeAllListeners('end');
         redisClient.on('error', err => {
             if (useRedis) console.error('Redis error', err.code || err.message || err);
             useRedis = false;
@@ -58,8 +67,11 @@ async function createRedis() {
             scheduleRedisReconnect();
         });
         await redisClient.connect();
+        // apenas loga se não estavamos conectados antes
+        if (!useRedis) {
+            console.log(`✅ Redis conectado em ${REDIS_URL}`);
+        }
         useRedis = true;
-        console.log(`✅ Redis conectado em ${REDIS_URL}`);
     } catch (err) {
         console.warn(`⚠️ Não foi possível conectar ao Redis (${REDIS_URL}), usando cache em memória:`, err.code || err.message || err);
         useRedis = false;
@@ -68,15 +80,28 @@ async function createRedis() {
 }
 
 function scheduleRedisReconnect() {
-    setTimeout(() => {
+    // evita múltiplos timers
+    if (redisReconnectTimer) return;
+
+    // exponencial com cap
+    redisReconnectDelay = Math.min(redisReconnectDelay * 1.5, REDIS_RECONNECT_MAX);
+    redisReconnectCount++;
+
+    redisReconnectTimer = setTimeout(async () => {
+        redisReconnectTimer = null;
         if (!useRedis) {
-            console.log('🔄 Tentando reconectar ao Redis...');
-            createRedis().catch(e => {
+            console.log(`🔄 Tentando reconectar ao Redis (tentativa #${redisReconnectCount}, próximo delay=${redisReconnectDelay}ms)`);
+            try {
+                await createRedis();
+            } catch (e) {
                 console.warn('Reconexão falhou:', e.message || e);
-            });
+                // agendar novamente
+                scheduleRedisReconnect();
+            }
         }
-    }, 5000);
+    }, redisReconnectDelay);
 }
+
 
 async function pollCandles(symbol, interval) {
     try {
@@ -291,8 +316,14 @@ app.get('/cache', async (req, res) => {
         try {
             res.json(JSON.parse(data));
         } catch (e) {
-            console.warn('JSON inválido lido do cache:', e.message || e, '->', data);
-            // ignora valor corrompido e devolve 404
+            console.warn('JSON inválido lido do cache:', e.message);
+            // log raw (stringify to show control chars)
+            console.warn('raw cache string:', JSON.stringify(data));
+            // remove chave corrupta para evitar reproduzir erro ad infinitum
+            try {
+                if (useRedis) redisClient.del(key).catch(() => { });
+            } catch (_) { }
+            inMemoryStore.delete(key);
             return res.status(404).send('cache vazio');
         }
     } catch (err) {
@@ -363,4 +394,7 @@ app.get('/tradeFee', async (req, res) => {
         console.log(`🔌 cacheServer rodando na porta ${PORT}`);
         console.log(`Usando Redis em ${REDIS_URL}`);
     });
+
+    // caso o Redis esteja indisponível no início, schedule reconnect
+    if (!useRedis) scheduleRedisReconnect();
 })();
