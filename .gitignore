@@ -3,6 +3,7 @@ node_modules/
 *.log
 
 # excluir dados gerados pelos bots
+/data/*_config.json
 /data/*_stats.json
 /data/stats_archives*/
 

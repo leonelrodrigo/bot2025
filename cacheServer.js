@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const Binance = require('binance-api-node').default;
 const redis = require('redis');
@@ -9,7 +10,10 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS, 10) || 60 * 1000; /
 const MAX_CANDLES = 500; // quantas velas manter em cache
 
 // clientes
-const binance = Binance();
+const binance = Binance({
+    apiKey: process.env.BINANCE_API_KEY || undefined,
+    apiSecret: process.env.BINANCE_API_SECRET || undefined,
+});
 let redisClient = null;
 let useRedis = true;          // indicador se Redis está disponível
 const inMemoryStore = new Map(); // fallback se Redis cair
@@ -343,6 +347,16 @@ app.get('/tradeFee', async (req, res) => {
 // não há mais handlers de stats duplicados; endpoints já definidos acima
 
 (async () => {
+    // log presence of credentials
+    const hasKey = !!process.env.BINANCE_API_KEY;
+    const hasSecret = !!process.env.BINANCE_API_SECRET;
+    if (!hasKey || !hasSecret) {
+        console.warn('⚠️ cacheServer iniciado SEM credenciais Binance (BINANCE_API_KEY/SECRET). `tradeFee` retornará 204.');
+    } else {
+        const mask = s => s ? `${s.slice(0, 4)}...${s.slice(-4)}` : 'n/a';
+        console.log(`🔑 credenciais Binance detectadas: key=${mask(process.env.BINANCE_API_KEY)} secret=${mask(process.env.BINANCE_API_SECRET)}`);
+    }
+
     await createRedis();
     // for compatibility with IPv4 clients (e.g. curl on Windows), bind to 0.0.0.0
     app.listen(PORT, '0.0.0.0', () => {
