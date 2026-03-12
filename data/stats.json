@@ -1,8 +1,8 @@
 {
   "sessao": {
-    "inicio": null,
-    "modo": null,
-    "symbol": null
+    "inicio": "2026-03-12T21:32:36.858Z",
+    "modo": "DEMO",
+    "symbol": "ETHUSDT"
   },
   "trades": {
     "total": 0,
@@ -17,8 +17,8 @@
     "maiorPrejuizoTrade": 0,
     "saldoInicialBase": 0,
     "saldoAtualBase": 0,
-    "saldoInicialMoeda": 0,
-    "saldoAtualMoeda": 0
+    "saldoInicialMoeda": 0.024,
+    "saldoAtualMoeda": 0.024
   },
   "historico": []
 }

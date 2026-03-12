@@ -33,10 +33,34 @@ async function fetchCache(path, params = {}) {
 let BOT_ID = '';
 // definimos DATA_DIR cedo para permitir os comandos acima
 const DATA_DIR = path.join(__dirname, 'data');
+// arquivo local para cache de filtros (stepSize/minQty/minAmt)
+const STEP_CACHE_PATH = path.join(DATA_DIR, 'step_cache.json');
 function ensureDataDir() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 ensureDataDir();
+
+// --- helpers para cache local de filtros ----------------------------------------------
+function loadStepCache() {
+    try {
+        if (fs.existsSync(STEP_CACHE_PATH)) {
+            const raw = fs.readFileSync(STEP_CACHE_PATH, 'utf8');
+            return JSON.parse(raw);
+        }
+    } catch (e) {
+        console.warn('⚠️ falha ao ler cache de step size:', e.message);
+    }
+    return null;
+}
+
+function saveStepCache(obj) {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(STEP_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+    } catch (e) {
+        console.warn('⚠️ falha ao gravar cache de step size:', e.message);
+    }
+}
 
 // helper para cópia recursiva de diretório
 function copyDir(src, dest) {
@@ -698,12 +722,22 @@ function roundStepSize(quantity) {
 
 // Ajusta quantidade para respeitar LOT_SIZE (stepSize), minQty e minNotional (minAmt).
 function adjustQtyToFilters(requestQty, side) {
-    // se stepSize indefinido, tenta um fallback simples
+    // se stepSize indefinido, tenta usar cache local e, se não existir, faz fallback simples
     if (!stepSize || !currentPrice || !minAmt || !minQty) {
-        try {
-            return parseFloat(requestQty.toFixed(8));
-        } catch (e) {
-            return null;
+        const cached = loadStepCache();
+        if (cached && cached.stepSize) {
+            stepSize = cached.stepSize;
+            minQty = cached.minQty;
+            minAmt = cached.minAmt;
+            console.log(chalk.yellow('[CACHE] usando filtros locais:',
+                `stepSize=${stepSize}`, `minQty=${minQty}`, `minAmt=${minAmt}`));
+            // continua com novos valores
+        } else {
+            try {
+                return parseFloat(requestQty.toFixed(8));
+            } catch (e) {
+                return null;
+            }
         }
     }
 
@@ -771,8 +805,33 @@ async function withRetry(fn, args = [], retries = 3, delay = 500) {
 
 async function updateMinOrderQty() {
     try {
-        const symbolInfo = await fetchCache('exchangeInfo', { symbol });
-        if (!symbolInfo) throw new Error(`Símbolo ${symbol} não encontrado via cache`);
+        let symbolInfo = null;
+        // tenta primeiro obter via cache server
+        try {
+            symbolInfo = await fetchCache('exchangeInfo', { symbol });
+        } catch (e) {
+            console.warn('[updateMinOrderQty] falha no cache server:', e.message);
+        }
+
+        // se cache não respondeu, **não** consultar API direta (evita rate limit)
+        if (!symbolInfo) {
+            console.warn('[updateMinOrderQty] cache indisponível e consulta direta desabilitada – tentaremos usar cache local.');
+        }
+
+        // se ainda não temos dados, tentamos usar cache local gravado anteriormente
+        if (!symbolInfo || !symbolInfo.symbol) {
+            const cached = loadStepCache();
+            if (cached) {
+                stepSize = cached.stepSize;
+                minQty = cached.minQty;
+                minAmt = cached.minAmt;
+                console.log(chalk.yellow(`[CACHE] Usando filtros em cache local:` +
+                    ` stepSize=${stepSize} minQty=${minQty} minAmt=${minAmt}`));
+                await balanceUpdt();
+                return;
+            }
+            throw new Error('Não foi possível obter informações de lote e nenhum cache local disponível.');
+        }
 
         const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
         const minNotionalFilter =
@@ -785,6 +844,11 @@ async function updateMinOrderQty() {
         }
 
         minAmt = minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5;
+
+        // grava valores para usos futuros
+        if (stepSize !== null && minQty !== null) {
+            saveStepCache({ stepSize, minQty, minAmt });
+        }
 
         await balanceUpdt();
 
