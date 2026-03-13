@@ -1845,6 +1845,7 @@ async function monitor() {
 
         if (strategy === 'SHORT') {
             console.log(`${demoTag}[${new Date().toLocaleTimeString()}] Preço: ${priceNow} | Lucro: ${lucroColor(lucroStr)}`);
+            console.log(`Saldo atual → ${base}: ${balanceAmt != null ? balanceAmt.toFixed(4) : 'N/A'} | ${moeda}: ${balanceQty != null ? balanceQty : 'N/A'}`);
             console.log(`Última venda: ${lastSell}`);
             console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
             console.log(`Modo: ${tradeSideColor}`);
@@ -1857,6 +1858,7 @@ async function monitor() {
             console.log(`SecureTrend: ${trendStatus} | RSI: ${rsi}`);
         } else {
             console.log(`${demoTag}[${new Date().toLocaleTimeString()}] Preço: ${priceNow} | Lucro: ${lucroColor(lucroStr)}`);
+            console.log(`Saldo atual → ${base}: ${balanceAmt != null ? balanceAmt.toFixed(4) : 'N/A'} | ${moeda}: ${balanceQty != null ? balanceQty : 'N/A'}`);
             console.log(`Última compra: ${lastBuy}`);
             console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
             console.log(`Side: ${tradeSideColor}`);
