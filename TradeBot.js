@@ -1166,12 +1166,10 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
         }
 
         // Atualiza saldo
-        if (!DEMO) {
-            try {
-                await balanceUpdt();
-            } catch (e) {
-                console.warn('Aviso: falha ao atualizar saldo antes de registrar trade:', e.message || e);
-            }
+        try {
+            await balanceUpdt();
+        } catch (e) {
+            console.warn('Aviso: falha ao atualizar saldo antes de registrar trade:', e.message || e);
         }
 
         // ─────────────────────────────────────────────
