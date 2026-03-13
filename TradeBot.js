@@ -1236,6 +1236,25 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
                     }
                 }
             }
+
+            // fallback for cases where DCA is enabled but the strategy was just cancelled
+            if (!dcaStrategy.isActive) {
+                if (side.toUpperCase() === 'SELL' && strategy === 'LONG' && buyPrice) {
+                    let feePaid = null;
+                    try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
+                    await registrarTrade('SELL', buyPrice, avgPrice, execQty, isStopLoss, feePaid);
+                    buyPrice = null;
+                    buyAmount = null;
+                }
+                if (side.toUpperCase() === 'BUY' && strategy === 'SHORT' && sellPrice) {
+                    let feePaid = null;
+                    try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
+                    await registrarTrade('BUY', sellPrice, avgPrice, execQty, isStopLoss, feePaid);
+                    sellPrice = null;
+                    sellAmount = null;
+                }
+            }
+
         } else {
             // Lógica original sem DCA
             if (side.toUpperCase() === 'SELL' && strategy === 'SHORT') {
@@ -1442,6 +1461,9 @@ async function executeSellStrategy() {
         console.log(chalk.yellow('[STRATEGY] RSI indisponível — pulando sell strategy neste ciclo.'));
         return;
     }
+    // secureLow só vale para *entrada* de SHORT; quando estamos fechando uma posição LONG
+    // devemos ignorar o filtro (fechamento não precisa obedecer "abaixo do mínimo diário").
+    const isClosingLong = strategy === 'LONG' && tradeSide === 'SELL';
     const aboveDailyLow = dailyLow ? currentPrice > (dailyLow * secureLow) : true;
 
     // variação usada para decidir alvo (entry baseado em candle anterior para SHORT ou preço de compra para LONG)
@@ -1478,17 +1500,20 @@ async function executeSellStrategy() {
         if (strategy === 'LONG') {
             const okVariacao = changePercentage >= alvoSell;
             const okTrend = trend;
-            const okLowFilter = aboveDailyLow;
+            const okLowFilter = isClosingLong ? true : aboveDailyLow;
             if (!okVariacao || !okTrend || !okLowFilter) {
-                console.log(chalk.gray(
-                    `[SELL] Aguardando condições → ` +
+                let msg = `[SELL] Aguardando condições → ` +
                     `Variação: ${changePercentage.toFixed(3)}% (alvo ≥ ${alvoSell}%) ${okVariacao ? '✅' : '❌'} | ` +
-                    `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% > ${secureTrend}%)`} | ` +
-                    `SecureLow: ${okLowFilter ? '✅' : '❌'}`
-                ));
+                    `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% > ${secureTrend}%)`}`;
+                if (!isClosingLong) {
+                    msg += ` | SecureLow: ${okLowFilter ? '✅' : '❌'}`;
+                } else {
+                    msg += ` | SecureLow: ignored (fechamento)`;
+                }
+                console.log(chalk.gray(msg));
             }
         }
-        if (changePercentage >= alvoSell && trend && aboveDailyLow) {
+        if (changePercentage >= alvoSell && trend && (isClosingLong ? true : aboveDailyLow)) {
 
             await balanceUpdt();
             console.log(`[${new Date().toLocaleTimeString()}] Variação: ${changePercentage.toFixed(2)}% | Ordem de Venda acionada`);
@@ -1548,6 +1573,9 @@ async function executeBuyStrategy() {
         console.log(chalk.yellow('[STRATEGY] RSI indisponível — pulando buy strategy neste ciclo.'));
         return;
     }
+    // secureHigh só deve ser aplicado quando estamos entrando em LONG;
+    // fechamento de SHORT ignora esse filtro.
+    const isClosingShort = strategy === 'SHORT' && tradeSide === 'BUY';
     const belowDailyHigh = dailyHigh ? currentPrice < (dailyHigh / secureHigh) : true;
 
     // variação usada para calcular se atingiu alvo (entry) — SHORT usa sellPrice, LONG usa vela anterior
@@ -1628,18 +1656,21 @@ async function executeBuyStrategy() {
     if (tradeSide === 'BUY' && strategy === 'SHORT' && (rsi <= rsiBuy || rsiBuy === 0)) {
         const okVariacao = changePercentage <= -alvoBuy;
         const okTrend = trend;
-        const okHighFilter = belowDailyHigh;
+        const okHighFilter = isClosingShort ? true : belowDailyHigh;
 
         if (!okVariacao || !okTrend || !okHighFilter) {
-            console.log(chalk.gray(
-                `[BUY] Aguardando condições → ` +
+            let msg = `[BUY] Aguardando condições → ` +
                 `Variação: ${changePercentage.toFixed(3)}% (alvo ≤ -${alvoBuy}%) ${okVariacao ? '✅' : '❌'} | ` +
-                `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% < -${secureTrend}%)`} | ` +
-                `SecureHigh: ${okHighFilter ? '✅' : '❌'}`
-            ));
+                `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% < -${secureTrend}%)`}`;
+            if (!isClosingShort) {
+                msg += ` | SecureHigh: ${okHighFilter ? '✅' : '❌'}`;
+            } else {
+                msg += ` | SecureHigh: ignored (fechamento)`;
+            }
+            console.log(chalk.gray(msg));
         }
 
-        if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
+        if (changePercentage <= -alvoBuy && trend && (isClosingShort ? true : belowDailyHigh)) {
 
             await balanceUpdt();
             console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra acionada`);
@@ -1761,6 +1792,8 @@ async function monitor() {
         const secureLowStatus = aboveDailyLow ? chalk.white.bold('true') : chalk.magenta.bold('false');
         const secureHighStatus = belowDailyHigh ? chalk.white.bold('true') : chalk.magenta.bold('false');
         const trendStatus = trend ? chalk.white.bold('true') : chalk.magenta.bold('false');
+        const closingLong = strategy === 'LONG' && tradeSide === 'SELL';
+        const closingShort = strategy === 'SHORT' && tradeSide === 'BUY';
 
         const lucroAcum = stats.financeiro.lucroLiquidoTotal;
         const lucroColor = lucroAcum >= 0 ? chalk.green.bold : chalk.red.bold;
@@ -1772,16 +1805,24 @@ async function monitor() {
             console.log(`Última venda: ${lastSell}`);
             console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
             console.log(`Modo: ${tradeSideColor}`);
-            if (tradeSide === 'SELL') console.log(`SecureLow: ${secureLowStatus}`);
-            else console.log(`SecureHigh: ${secureHighStatus}`);
+            if (tradeSide === 'SELL') {
+                console.log(`SecureLow: ${secureLowStatus}`);
+            } else {
+                if (closingShort) console.log(`SecureHigh: ${secureHighStatus} (fechamento - sem filtro)`);
+                else console.log(`SecureHigh: ${secureHighStatus}`);
+            }
             console.log(`SecureTrend: ${trendStatus} | RSI: ${rsi}`);
         } else {
             console.log(`${demoTag}[${new Date().toLocaleTimeString()}] Preço: ${priceNow} | Lucro: ${lucroColor(lucroStr)}`);
             console.log(`Última compra: ${lastBuy}`);
             console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
             console.log(`Side: ${tradeSideColor}`);
-            if (tradeSide === 'BUY') console.log(`SecureHigh: ${secureHighStatus}`);
-            else console.log(`SecureLow: ${secureLowStatus}`);
+            if (tradeSide === 'BUY') {
+                if (closingLong) console.log(`SecureHigh: ${secureHighStatus} (fechamento - sem filtro)`);
+                else console.log(`SecureHigh: ${secureHighStatus}`);
+            } else {
+                console.log(`SecureLow: ${secureLowStatus}`);
+            }
             console.log(`SecureTrend: ${trendStatus} | RSI: ${rsi}`);
         }
 
