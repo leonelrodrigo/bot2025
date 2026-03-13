@@ -84,13 +84,13 @@ if (listArg) {
     ensureDataDir();
     const entries = fs.readdirSync(DATA_DIR);
     const ids = new Set();
-    entries.forEach(fn => {
+    entries.forEach((fn) => {
         const m = fn.match(/^(.*)_(config|stats)\.json$/);
         if (m) ids.add(m[1]);
     });
     if (entries.includes('config.json') || entries.includes('stats.json')) ids.add('');
     console.log('Bots encontrados:');
-    ids.forEach(id => console.log(id || '(default)'));
+    ids.forEach((id) => console.log(id || '(default)'));
     process.exit(0);
 }
 
@@ -583,6 +583,7 @@ let buyAmount = null;
 let sellAmount = null;
 
 // qty of last executed orders, used when reinvestMode === 'equal'
+// eslint-disable-next-line no-unused-vars
 let lastBuyQty = null;
 let lastSellQty = null;
 
@@ -1924,6 +1925,7 @@ async function monitor() {
 
     // wrap monitor to log timestamp only at start
     const originalMonitor = monitor;
+    // eslint-disable-next-line no-func-assign
     monitor = async function () {
         logTS('início de monitor');
         await originalMonitor();
