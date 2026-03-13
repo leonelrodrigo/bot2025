@@ -327,12 +327,27 @@ const SAFETY_MARGIN = 0.999;
 
 // lucro acumulado em `base` que ainda não foi reinvestido
 let profitBankBase = 0;
+// em modo equal armazenamos também um "objetivo" de banca que deve ser
+// retornado ao valor original antes de gastar mais lucro
+let targetBalanceBase = null;
+let targetBalanceQty = null;
 
 // helpers para balances que consideram reinvestimento
 function getEffectiveBalanceQty(currentPrice) {
     // quantidade disponível sem incluir lucros a reinvestir em base;
     // lucros em 'moeda' já são convertidos imediatamente em accumulateProfit
     let qty = balanceQty;
+    // modo equal: se temos um alvo de qty (valor usado na última ordem
+    // de fechamento SHORT) e o saldo está abaixo, tentamos repor usando
+    // lucros em base convertidos pelo preço atual.
+    if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && currentPrice && currentPrice > 0) {
+        const deficit = targetBalanceQty - qty;
+        if (deficit > 0 && profitBankBase > 0) {
+            const convert = Math.min(deficit, profitBankBase / currentPrice);
+            qty += convert;
+            profitBankBase -= convert * currentPrice;
+        }
+    }
     return qty;
 }
 
@@ -345,12 +360,26 @@ function getEffectiveBalanceAmt(currentPrice) {
         // em DEMO o saldo já inclui o lucro, apenas limpamos o banco
         profitBankBase = 0;
     }
+    // modo equal: restaurar bankroll de base até o valor usado na última
+    // ordem de fechamento LONG, usando lucros previamente acumulados
+    if (cfg.operacao.reinvestMode === 'equal' && targetBalanceBase != null) {
+        const deficit = targetBalanceBase - amt;
+        if (deficit > 0 && profitBankBase > 0) {
+            const use = Math.min(deficit, profitBankBase);
+            amt += use;
+            profitBankBase -= use;
+        }
+    }
     return amt;
 }
 
 // função chamada após um trade fechado para acumular lucro ou convertê‑lo
 function accumulateProfit(lucroBase) {
-    if (lucroBase > 0 && cfg.operacao.reinvestProfits) {
+    // lucros positivos podem ser usados em três situações:
+    //  - reinvestProfits=true em modo base/moeda (comportamento anterior)
+    //  - reinvestProfits=false **mas modo equal**, precisamos guardar o lucro
+    //    para recompor a banca mesmo que reinvest não esteja ativo
+    if (lucroBase > 0 && (cfg.operacao.reinvestProfits || cfg.operacao.reinvestMode === 'equal')) {
         if (cfg.operacao.reinvestMode === 'moeda' && currentPrice && !isNaN(currentPrice) && currentPrice > 0) {
             const extra = lucroBase / currentPrice;
             // adiciona imediatamente ao saldo de moeda
@@ -363,6 +392,8 @@ function accumulateProfit(lucroBase) {
             console.log(chalk.magenta(`[REINVEST] lucro de ${lucroBase.toFixed(8)} ${base} convertido em ${extra.toFixed(8)} ${moeda}`));
         } else {
             // modo base ou equal (ou não há preço válido para converter)
+            // em equal guardamos para reposição de banca, mas também serve
+            // como lucro acumulado se sobrar
             profitBankBase += lucroBase;
             console.log(chalk.magenta(`[REINVEST] lucro de ${lucroBase.toFixed(8)} ${base} adicionado ao banco`));
         }
@@ -662,6 +693,18 @@ async function registrarTrade(side, entryPrice, exitPrice, qty, isStopLoss = fal
 
     // se houver lucro e reinvestimento habilitado, acumula para o banco
     accumulateProfit(lucroLiquido);
+
+    // modo equal: registrar o valor usado na ordem para que a banca possa ser
+    // reposta até esse nível na próxima rodada
+    if (cfg.operacao.reinvestMode === 'equal') {
+        if (strategy === 'LONG' && side === 'SELL') {
+            // quantia de base utilizada para comprar a moeda
+            targetBalanceBase = entryPrice * qty;
+        } else if (strategy === 'SHORT' && side === 'BUY') {
+            // quantidade de moeda usada para fechar a posição
+            targetBalanceQty = qty;
+        }
+    }
 }
 
 // exibe desempenho acumulado em qualquer ponto

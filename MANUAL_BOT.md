@@ -171,9 +171,9 @@ Esses valores podem ser alterados em runtime (config server observa arquivo e ap
 - **SHORT**: abre posição vendida em altas e fecha em quedas (requere saldo/mini contrato configurado). 
 
 ### Reinvestimento
-- **`base`**: lucros convertidos para o ativo `base` antes de reinvestir.
-- **`moeda`**: conversão para `moeda`.
-- **`equal`**: mantém mesma quantidade negociada do trade anterior oposto.
+- **`base`** – lucros ficam em `base` (ex: USDT/BRL). Quando uma nova ordem é feita, o bot injeta parte ou todo esse saldo de base para preservar o valor usado anteriormente; o restante permanece acumulado como lucro. Ideal quando você quer manter o capital em moeda base.
+- **`moeda`** – lucros são convertidos imediatamente para a `moeda` negociada e adicionados ao saldo. Não há banco de base; a quantidade de moeda cresce diretamente com o lucro.
+- **`equal`** – o bot tenta retornar à **mesma banca** utilizada na ordem anterior. ele usa o volume do último trade oposto ao calcular a próxima quantidade e, se a banca tiver caído, repõe a diferença usando lucro acumulado. o modo não cria novas conversões automáticas pretendendo apenas evitar a erosão da banca, deixando ganhos excedentes livres para acumular.
 
 ### DCA (Dollar Cost Averaging)
 - Enquanto `dca.enabled`:
