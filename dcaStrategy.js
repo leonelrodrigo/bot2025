@@ -17,12 +17,13 @@ class DCAStrategy {
         this.strategy = config.strategy;
 
         // Configuração de ganhos
+        const profitConfig = config.profitConfig || {};
         this.profitConfig = {
-            baseProfit: config.baseProfit || 0.5,           // Lucro base por ordem
-            extraOrderMultiplier: config.extraOrderMultiplier || 1.2, // Multiplicador para ordens extras
-            minTotalProfit: config.minTotalProfit || 0.5,    // Lucro mínimo total (%)
-            maxTotalProfit: config.maxTotalProfit || 2.0,     // Lucro máximo total (%)
-            compoundProfits: config.compoundProfits || false  // Se os lucros são compostos
+            baseProfit: profitConfig.baseProfit ?? 0.5,           // Lucro base por ordem
+            extraOrderMultiplier: profitConfig.extraOrderMultiplier ?? 1.2, // Multiplicador para ordens extras
+            minTotalProfit: profitConfig.minTotalProfit ?? 0.5,    // Lucro mínimo total (%)
+            maxTotalProfit: profitConfig.maxTotalProfit ?? 2.0,     // Lucro máximo total (%)
+            compoundProfits: profitConfig.compoundProfits ?? false  // Se os lucros são compostos
         };
 
         this.reset();
@@ -97,7 +98,9 @@ class DCAStrategy {
         });
 
         // Lucro total percentual ponderado
-        const totalProfitPercent = totalWeight;
+        let totalProfitPercent = totalWeight;
+        // aplica limites mínimo/máximo definidos em config
+        totalProfitPercent = Math.min(Math.max(totalProfitPercent, this.profitConfig.minTotalProfit), this.profitConfig.maxTotalProfit);
 
         // Preço alvo ponderado
         let weightedTarget = 0;

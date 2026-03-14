@@ -152,13 +152,20 @@ O arquivo `config.json` contém várias seções:
 - `pctCompra`, `pctVenda`, `pctBaseLong`, `pctMoedaShort`
 
 ### `operacao`
-- `reinvestProfits`: boolean
+- `reinvestProfits`: boolean — se `true`, lucros são reinvestidos conforme `reinvestMode`; se `false`, lucros são mantidos (mas podem ser usados para equilibrar ordens no modo `equal`).
 - `reinvestMode`: `'base'`, `'moeda'`, `'equal'`
 
 ### `dca`
 - `enabled`: boolean
-- `maxOrders`: inteiro
-- `targetPercent`: decimal
+- `maxOrders`: inteiro (número de ordens extras além da ordem base)
+- `targetPercent`: decimal (queda/alta percentual para acionar cada ordem extra)
+- `adaptiveStopLoss`: boolean (ativa o stop loss adaptativo baseado na posição DCA)
+- `stopLossBuffer`: decimal (buffer percentual usado para afastar o stop loss do preço médio)
+- `profitConfig`: objeto com parâmetros de lucro:
+  - `baseProfit`: percentual de lucro alvo da ordem base
+  - `extraOrderMultiplier`: fator de multiplicação do alvo de lucro para cada ordem DCA adicional
+  - `minTotalProfit`: lucro mínimo exigido para fechar a posição
+  - `maxTotalProfit`: limite máximo de lucro para fechar a posição
 
 Esses valores podem ser alterados em runtime (config server observa arquivo e aplica alguns campos sem reiniciar).
 

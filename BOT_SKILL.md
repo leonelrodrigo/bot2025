@@ -45,8 +45,8 @@ Ver seção 6 do manual (`MANUAL_BOT.md`) para a lista completa de configuraçõ
   * `base`: lucro guardado em ativo base e usado para garantir que a banca inicial não encolha; resto vira lucro.  
   * `moeda`: lucro convertido diretamente em moeda negociada.  
   * `equal`: preserva o valor usado na última ordem (inclui ordens extras DCA), recompondo qualquer déficit com lucro acumulado.
-- DCA com `maxOrders` e `targetPercent`.
-- Stop loss adaptativo influenciado pelo estado de DCA.
+- DCA com `maxOrders`, `targetPercent` e `profitConfig` (baseProfit, extraOrderMultiplier, min/max total profit).
+- Stop loss adaptativo influenciado pelo estado de DCA (`adaptiveStopLoss`) e buffer configurável (`stopLossBuffer`).
 
 O agente deve compreender como cada parâmetro influencia a tomada de decisão.
 

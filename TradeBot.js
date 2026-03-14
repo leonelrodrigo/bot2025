@@ -1185,7 +1185,8 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
                     symbol,
                     base,
                     moeda,
-                    strategy
+                    strategy,
+                    profitConfig: (cfg.dca && cfg.dca.profitConfig) ? cfg.dca.profitConfig : {}
                 });
             }
 
@@ -1421,52 +1422,40 @@ async function checkStopLossShort() {
 // ---------------------------------------------------------
 
 function calculateAdaptiveStopLoss() {
-    if (!dcaEnabled || !dcaStrategy || !dcaStrategy.isActive) {
-        // Se DCA não está ativo, usa stop loss normal
+    if (!dcaEnabled || !dcaStrategy || !dcaStrategy.isActive || !cfg.dca?.adaptiveStopLoss) {
+        // Se DCA não está ativo ou stop loss adaptativo desabilitado, usa stop loss normal
         return strategy === 'LONG' ? stopLossPercentLong : stopLossPercentShort;
     }
+
+    const stopLossBuffer = (cfg.dca && typeof cfg.dca.stopLossBuffer === 'number') ? cfg.dca.stopLossBuffer : 1.5;
 
     const posInfo = dcaStrategy.getPositionInfo();
     const ordersUsed = posInfo.ordersCount;
     const averagePrice = posInfo.averageEntryPrice;
 
-    // Calcula o drawdown máximo que ainda permite as próximas ordens
-    // Se temos maxOrders = 3 e já usamos 1 ordem, ainda temos 2 ordens pela frente
-    const remainingOrders = dcaMaxOrders - ordersUsed;
-
-    // Cada ordem precisa de targetPercent% de espaço
-    // Mas também precisamos de um buffer de segurança
-    const requiredSpaceForExtraOrders = remainingOrders * dcaTargetPercent * 1.2; // 20% de buffer
-
-    // O stop loss não pode ser mais apertado que o espaço necessário para as próximas ordens
+    // Para evitar stop loss apertado demais, garantimos que ele seja pelo menos o buffer configurado
+    // e também que permita as próximas ordens DCA.
     let adaptiveStopPercent;
 
     if (strategy === 'LONG') {
-        // Para LONG, o stop loss deve ser abaixo do preço da próxima ordem extra
+        // Próxima ordem extra em função do targetPercent
         const nextOrderPrice = averagePrice * (1 - (dcaTargetPercent / 100) * (ordersUsed + 1));
         const stopFromAvg = ((averagePrice - nextOrderPrice) / averagePrice) * 100;
 
-        // Stop loss adaptativo = máximo entre:
-        // 1. O necessário para as próximas ordens (com folga)
-        // 2. O stop loss original (nunca mais apertado que o original)
-        adaptiveStopPercent = Math.max(
-            stopFromAvg * 1.5, // 50% de folga além do preço da próxima ordem
-            stopLossPercentLong
-        );
+        const minStopByDca = stopFromAvg * stopLossBuffer;
+        adaptiveStopPercent = Math.max(stopLossPercentLong, stopLossBuffer, minStopByDca);
 
-        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentLong}%)`));
+        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentLong}%, buffer: ${stopLossBuffer}%)`));
         console.log(chalk.cyan(`   Próxima ordem extra em: $${nextOrderPrice.toFixed(2)} (-${stopFromAvg.toFixed(2)}%)`));
 
     } else { // SHORT
         const nextOrderPrice = averagePrice * (1 + (dcaTargetPercent / 100) * (ordersUsed + 1));
         const stopFromAvg = ((nextOrderPrice - averagePrice) / averagePrice) * 100;
 
-        adaptiveStopPercent = Math.max(
-            stopFromAvg * 1.5,
-            stopLossPercentShort
-        );
+        const minStopByDca = stopFromAvg * stopLossBuffer;
+        adaptiveStopPercent = Math.max(stopLossPercentShort, stopLossBuffer, minStopByDca);
 
-        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentShort}%)`));
+        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentShort}%, buffer: ${stopLossBuffer}%)`));
         console.log(chalk.cyan(`   Próxima ordem extra em: $${nextOrderPrice.toFixed(2)} (+${stopFromAvg.toFixed(2)}%)`));
     }
 
@@ -1891,9 +1880,11 @@ async function monitor() {
             const posInfo = dcaStrategy.getPositionInfo();
             const profitNow = dcaStrategy.calculateGuaranteedProfit(currentPrice);
             const profitPercentNow = dcaStrategy.calculateProfitPercent(currentPrice);
+            const lastOrderPrice = dcaStrategy.lastActionPrice;
 
-            console.log(chalk.magentaBright(`📊 DCA Ativo: #${posInfo.ordersCount}/${posInfo.maxOrders} ordens | Preço médio: ${posInfo.averageEntryPrice.toFixed(6)}`));
-            console.log(chalk.magentaBright(`   Alvo: ${posInfo.currentTargetPrice.toFixed(6)} | Lucro atual: ${profitNow.toFixed(4)} ${base} (${profitPercentNow.toFixed(2)}%)`));
+            console.log(chalk.magentaBright(`📊 DCA Ativo: #${posInfo.ordersCount}/${posInfo.maxOrders} ordens | Última ordem: ${lastOrderPrice?.toFixed(6) || 'N/A'}`));
+            console.log(chalk.magentaBright(`   Preço médio: ${posInfo.averageEntryPrice.toFixed(6)} | Alvo: ${posInfo.currentTargetPrice.toFixed(6)}`));
+            console.log(chalk.magentaBright(`   Lucro atual: ${profitNow.toFixed(4)} ${base} (${profitPercentNow.toFixed(2)}%)`));
             console.log(chalk.magentaBright('-----------------------------------'));
         }
 

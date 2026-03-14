@@ -9,7 +9,7 @@
   },
   "operacao": {
     "reinvestProfits": false,
-    "_comentario": "(base) mantém lucro em USDT; (moeda) converte para ETH; (equal) usa mesma quantidade da ordem anterior",
+    "_comentario": "Se true, o lucro das operações é reinvestido de acordo com reinvestMode; se false, o lucro é mantido e usado apenas para equilibrar ordens no modo equal.",
     "reinvestMode": "equal"
   },
   "dca": {
@@ -22,8 +22,7 @@
       "baseProfit": 0.25,
       "extraOrderMultiplier": 1.2,
       "minTotalProfit": 0.25,
-      "maxTotalProfit": 1.0,
-      "compoundProfits": false
+      "maxTotalProfit": 1.0
     }
   },
   "taxas": {
