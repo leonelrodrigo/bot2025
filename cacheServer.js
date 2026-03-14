@@ -1,3 +1,4 @@
+/* eslint-disable no-empty */
 // cacheServer.js — versão final (miniTicker, on-demand, sem polling REST)
 
 require('dotenv').config({ override: true });
@@ -10,6 +11,8 @@ const PORT = process.env.CACHE_PORT || 4000;
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS, 10) || 60 * 1000; // 1 minuto
 const MAX_CANDLES = 500; // quantas velas manter em cache
+// Ativa logs de miniTicker (preço recebido via WS). Sete para 'false' para silenciar.
+const LOG_MINITICKER = String(process.env.LOG_MINITICKER || 'true').toLowerCase() !== 'false';
 // ---------- Clients ----------
 const binance = Binance({
     apiKey: process.env.BINANCE_API_KEY || undefined,
@@ -102,7 +105,9 @@ function subscribePrice(symbol) {
                 return;
 
             }
-            console.log(`${ts} miniTicker WS ${symbol} preço: ${p}`);
+            if (LOG_MINITICKER) {
+                console.log(`${ts} miniTicker WS ${symbol} preço: ${p}`);
+            }
             if (useRedis) redisClient.hSet('prices', symbol, String(p)).catch(() => { });
             priceStore.set(symbol, p);
         });
