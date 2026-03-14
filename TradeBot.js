@@ -327,6 +327,43 @@ function getCurrentState() {
     return state;
 }
 
+function validatePersistedState() {
+    if (!persistedState) return;
+
+    const eps = 1e-8;
+    const hasQty = balanceQty != null && balanceQty > eps;
+    const hasBase = balanceAmt != null && balanceAmt > eps;
+    let inconsistent = false;
+
+    // Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
+    if (strategy === 'LONG' && tradeSide === 'SELL') {
+        if (!hasQty) inconsistent = true;
+    }
+
+    // Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
+    if (strategy === 'SHORT' && tradeSide === 'BUY') {
+        if (!hasBase) inconsistent = true;
+    }
+
+    // Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
+    if (persistedState.dca && persistedState.dca.isActive) {
+        if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
+            inconsistent = true;
+        }
+    }
+
+    if (inconsistent) {
+        console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
+        tradeSide = cfg.modo.tradeSide;
+        buyPrice = null;
+        sellPrice = null;
+        buyAmount = null;
+        sellAmount = null;
+        if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
+        saveState(defaultState());
+    }
+}
+
 function restoreDcaState(saved) {
     if (!saved || !saved.isActive) return null;
 
@@ -521,7 +558,6 @@ const client = Binance({
 // Cache de taxas por símbolo (consultado via API em modo REAL)
 let tradeFeeCache = { ts: 0, data: null };
 let tradeFeePerSymbol = {}; // mapping symbol -> taker fee (decimal)
-const DEFAULT_FEE_CACHE_TTL = 10 * 60 * 1000;
 
 async function fetchTradeFees(symbol) {
     // cache por 10 minutos local também
@@ -705,10 +741,6 @@ if (persistedState) {
     }
 }
 
-// qty of last executed orders, used when reinvestMode === 'equal'
-// eslint-disable-next-line no-unused-vars
-let lastBuyQty = null;
-let lastSellQty = null;
 
 // accumulators for equal mode: sum of consecutive orders on each side
 let accumBuyQty = 0;
@@ -859,7 +891,6 @@ function logStats() {
             const currMoeda = fin.saldoAtualMoeda;
             if (typeof initMoeda === 'number' && typeof currMoeda === 'number') {
                 const variacao = currMoeda - initMoeda;
-                const varStr = `${variacao >= 0 ? '+' : ''}${variacao.toFixed(4)}`;
                 const varColor = variacao >= 0 ? chalk.green : chalk.red;
                 // exibe também variação absoluta ao lado do saldo atual
                 const sinal = variacao >= 0 ? '+' : '';
@@ -871,7 +902,6 @@ function logStats() {
             }
         } else {
             const variacao = (fin.saldoAtualBase - fin.saldoInicialBase);
-            const varStr = `${variacao >= 0 ? '+' : ''}${variacao.toFixed(4)}`;
             const varColor = variacao >= 0 ? chalk.green : chalk.red;
             const sinal2 = variacao >= 0 ? '+' : '';
             console.log(`Saldo ${base}: ${fin.saldoInicialBase.toFixed(2)} → ${varColor(parseFloat(fin.saldoAtualBase).toFixed(2))} (${sinal2}${variacao.toFixed(4)})`);
@@ -883,11 +913,6 @@ function logStats() {
 // ─────────────────────────────────────────────
 // Utilitários
 // ─────────────────────────────────────────────
-
-function roundStepSize(quantity) {
-    const precision = Math.ceil(-Math.log10(stepSize));
-    return parseFloat((Math.floor(quantity / stepSize) * stepSize).toFixed(precision));
-}
 
 // Ajusta quantidade para respeitar LOT_SIZE (stepSize), minQty e minNotional (minAmt).
 function adjustQtyToFilters(requestQty, side) {
@@ -1280,11 +1305,9 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
         const avgPrice = execQuote / execQty;
         // track for equal-mode reinvest
         if (side.toUpperCase() === 'SELL') {
-            lastSellQty = execQty;
             accumSellQty += execQty;
             accumBuyQty = 0;
         } else {
-            lastBuyQty = execQty;
             accumBuyQty += execQty;
             accumSellQty = 0;
         }
@@ -1759,20 +1782,6 @@ async function executeBuyStrategy() {
 
     // ── Bloco de entrada LONG (simétrico inverso ao SELL do SHORT) ──
     if (tradeSide === 'BUY' && strategy === 'LONG' && (rsi <= rsiBuy || rsiBuy === 0)) {
-        const okVariacao = changePercentage <= -alvoBuy;
-        const okTrend = trend;
-        const okHighFilter = belowDailyHigh;
-
-        /*
-        if (!okVariacao || !okTrend || !okHighFilter) {
-            console.log(chalk.gray(
-                `[BUY-LONG] Aguardando condições → ` +
-                `Variação: ${changePercentage.toFixed(3)}% (alvo ≤ -${alvoBuy}%) ${okVariacao ? '✅' : '❌'} | ` +
-                `Trend: ${okTrend ? '✅' : `❌ (${trendPct !== null ? trendPct.toFixed(3) : 'N/A'}% < -${secureTrend}%)`} | ` +
-                `SecureHigh: ${okHighFilter ? '✅' : '❌'}`
-            ));
-        }
-        */
 
         if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
             await balanceUpdt();
@@ -2053,6 +2062,16 @@ async function monitor() {
 
     await updateMinOrderQty();
     await applySymbolFeesOnInit();
+
+    // Garantir que o saldo esteja carregado antes de validar o estado persistido
+    try {
+        await balanceUpdt();
+    } catch (e) {
+        console.warn('Aviso: falha ao atualizar saldo para validação de estado persistido:', e.message || e);
+    }
+
+    // Valida o estado salvo e, se inconsistente, reseta para evitar trades incorretos
+    validatePersistedState();
 
     // Inicializa sessão nas stats (apenas na primeira execução)
     // Se a sessão anterior for de outro modo (DEMO vs REAL) ou par diferente, reinicializa sessão
