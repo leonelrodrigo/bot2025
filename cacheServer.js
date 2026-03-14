@@ -1,59 +1,50 @@
-require('dotenv').config();
+// cacheServer.js — versão final (miniTicker, on-demand, sem polling REST)
+
+require('dotenv').config({ override: true });
 const express = require('express');
 const Binance = require('binance-api-node').default;
 const redis = require('redis');
 
-// configurações básicas
+// ---------- Config ----------
 const PORT = process.env.CACHE_PORT || 4000;
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL_MS, 10) || 60 * 1000; // 1 minuto
 const MAX_CANDLES = 500; // quantas velas manter em cache
-
-// clientes
+// ---------- Clients ----------
 const binance = Binance({
     apiKey: process.env.BINANCE_API_KEY || undefined,
     apiSecret: process.env.BINANCE_API_SECRET || undefined,
 });
+
 let redisClient = null;
-let useRedis = true;          // indicador se Redis está disponível
-const inMemoryStore = new Map(); // fallback se Redis cair
+let useRedis = true;
+const inMemoryStore = new Map();
 
-// reconexão controlada
 let redisReconnectTimer = null;
-let redisReconnectDelay = 5000; // começa em 5s
-const REDIS_RECONNECT_MAX = 60000; // cap 1 minuto entre tentativas
-let redisReconnectCount = 0; // para logs de monitoramento
+let redisReconnectDelay = 5000;
+const REDIS_RECONNECT_MAX = 60000;
 
-// caches extras (preços e stats) para fornecer ao bot
-const priceStore = new Map();   // symbol -> lastPrice
-const statsStore = new Map();   // symbol -> { lowPrice, highPrice, ... }
+// ---------- Stores ----------
+const priceStore = new Map();
+const statsStore = new Map();
+const trackers = new Map();
+const lastInvalidLogTs = new Map();
+const INVALID_LOG_THROTTLE_MS = 60 * 1000;
 
-// chaves de tracking em memória para evitar polls duplicados
-const trackers = new Map(); // key -> timerId
+// ---------- Utils ----------
+function nowTs() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
+}
 
-// caches adicionais para preços e 24h stats
-// usamos hset/hget no Redis, ou Maps locais se Redis indisponível
-
-// no Redis usaremos as hashes 'prices' e 'stats24h'
-
-// cache de exchangeInfo para evitar várias chamadas
-let exchangeInfoCache = null;
-
-// cache de trade fees similares ao bot
-let tradeFeeCache = { ts: 0, data: {} };
-
+// ---------- Redis ----------
 async function createRedis() {
     try {
         redisClient = redis.createClient({
             url: REDIS_URL,
-            socket: {
-                reconnectStrategy: (retries) => {
-                    // tentativas exponenciais até 10s
-                    return Math.min(retries * 100, 10000);
-                }
-            }
+            socket: { reconnectStrategy: retries => Math.min(retries * 100, 10000) },
         });
-        // remover listeners anteriores caso exista
         redisClient.removeAllListeners('error');
         redisClient.removeAllListeners('end');
         redisClient.on('error', err => {
@@ -61,16 +52,9 @@ async function createRedis() {
             useRedis = false;
             scheduleRedisReconnect();
         });
-        redisClient.on('end', () => {
-            console.warn('Redis connection closed');
-            useRedis = false;
-            scheduleRedisReconnect();
-        });
+        redisClient.on('end', () => { console.warn('Redis connection closed'); useRedis = false; scheduleRedisReconnect(); });
         await redisClient.connect();
-        // apenas loga se não estavamos conectados antes
-        if (!useRedis) {
-            console.log(`✅ Redis conectado em ${REDIS_URL}`);
-        }
+        if (!useRedis) console.log(`✅ Redis conectado em ${REDIS_URL}`);
         useRedis = true;
     } catch (err) {
         console.warn(`⚠️ Não foi possível conectar ao Redis (${REDIS_URL}), usando cache em memória:`, err.code || err.message || err);
@@ -78,40 +62,64 @@ async function createRedis() {
         scheduleRedisReconnect();
     }
 }
-
 function scheduleRedisReconnect() {
-    // evita múltiplos timers
     if (redisReconnectTimer) return;
-
-    // exponencial com cap
     redisReconnectDelay = Math.min(redisReconnectDelay * 1.5, REDIS_RECONNECT_MAX);
-    redisReconnectCount++;
-
     redisReconnectTimer = setTimeout(async () => {
         redisReconnectTimer = null;
         if (!useRedis) {
-            console.log(`🔄 Tentando reconectar ao Redis (tentativa #${redisReconnectCount}, próximo delay=${redisReconnectDelay}ms)`);
-            try {
-                await createRedis();
-            } catch (e) {
+            console.log(`🔄 Tentando reconectar ao Redis (delay=${redisReconnectDelay}ms)`);
+            try { await createRedis(); } catch (e) {
                 console.warn('Reconexão falhou:', e.message || e);
-                // agendar novamente
                 scheduleRedisReconnect();
             }
         }
     }, redisReconnectDelay);
 }
 
+// ---------- Price Subscription ----------
+function subscribePrice(symbol) {
+    if (priceStore.has(symbol)) return;
+    priceStore.set(symbol, null);
+    try {
+        binance.ws.miniTicker(symbol, ticker => {
+            const ts = nowTs();
+            const p = parseFloat(
+                ticker.c ??
+                ticker.curDayClose ??
+                ticker.close ??
+                ticker.price ??
+                ticker.lastPrice ??
+                0
+            );
+            if (isNaN(p) || p <= 0) {
+                const now = Date.now();
+                const prev = lastInvalidLogTs.get(symbol) || 0;
+                if (now - prev > INVALID_LOG_THROTTLE_MS) {
+                    console.log(`${ts} miniTicker WS para ${symbol} veio com preço inválido (${p}), payload: ${JSON.stringify(ticker)}`);
+                    lastInvalidLogTs.set(symbol, now);
+                }
+                return;
 
+            }
+            console.log(`${ts} miniTicker WS ${symbol} preço: ${p}`);
+            if (useRedis) redisClient.hSet('prices', symbol, String(p)).catch(() => { });
+            priceStore.set(symbol, p);
+        });
+    } catch (e) {
+        console.error(`[subscribePrice] Erro ao criar miniTicker para ${symbol}:`, e.message || e);
+    }
+}
+
+// ---------- Candle Polling ----------
 async function pollCandles(symbol, interval) {
     try {
         const candles = await binance.candles({ symbol, interval, limit: MAX_CANDLES });
         const closes = candles.map(c => parseFloat(c.close));
         const key = `candles:${symbol}:${interval}`;
         if (useRedis) {
-            try {
-                await redisClient.set(key, JSON.stringify(closes));
-            } catch (e) {
+            try { await redisClient.set(key, JSON.stringify(closes)); }
+            catch (e) {
                 console.warn('Erro ao gravar Redis, caindo para memória:', e.message);
                 useRedis = false;
                 inMemoryStore.set(key, closes);
@@ -120,48 +128,13 @@ async function pollCandles(symbol, interval) {
             inMemoryStore.set(key, closes);
         }
         console.log(`🔁 [cache] atualizado ${symbol}@${interval} (${closes.length} valores)`);
-        // também atualiza stats 24h sempre que houver poll de candles
         await update24h(symbol);
     } catch (err) {
         console.warn(`Falha ao buscar candles ${symbol}@${interval}:`, err.message || err);
     }
 }
 
-// helpers para manter preço e stats atualizados
-// guarda a última vez que um preço inválido foi logado, para não floodar
-const lastInvalidLogTs = new Map();
-const INVALID_LOG_THROTTLE_MS = 60 * 1000; // 1 minuto
-
-function subscribePrice(symbol) {
-    if (priceStore.has(symbol)) return;
-    priceStore.set(symbol, null);
-    binance.ws.ticker(symbol, ticker => {
-        // event payload may vary; try multiple fields
-        const p = parseFloat(
-            ticker.lastPrice ||
-            ticker.curDayClosePrice ||
-            ticker.curDayClose ||
-            ticker.close ||
-            ticker.price ||
-            0
-        );
-        if (isNaN(p) || p <= 0) {
-            const now = Date.now();
-            const prev = lastInvalidLogTs.get(symbol) || 0;
-            if (now - prev > INVALID_LOG_THROTTLE_MS) {
-                // log raw ticker payload for sniffing
-                const ts = (() => { const d = new Date(), pad = n => String(n).padStart(2, '0'); return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`; })();
-                console.log(`${ts} ticker WS para ${symbol} veio com preço inválido (${p}), payload: ${JSON.stringify(ticker)}`);
-                lastInvalidLogTs.set(symbol, now);
-            }
-            // ignore invalid value without overwriting existing price
-            return;
-        }
-        if (useRedis) redisClient.hSet('prices', symbol, String(p)).catch(() => { });
-        priceStore.set(symbol, p);
-    });
-}
-
+// ---------- 24h Stats ----------
 async function update24h(symbol) {
     try {
         const stats = await binance.dailyStats({ symbol });
@@ -172,78 +145,36 @@ async function update24h(symbol) {
     }
 }
 
+// ---------- Tracker ----------
 async function trackSymbol(symbol, interval) {
     const key = `${symbol}:${interval}`;
     if (trackers.has(key)) return;
 
-    const ts = (() => {
-        const d = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
-    })();
+    const ts = nowTs();
     console.log(`${ts} trackSymbol chamado para ${symbol}@${interval}`);
 
-    // garante que preço e stats sejam assinados/atualizados
+    // Preço e stats via WS
     subscribePrice(symbol);
-    update24h(symbol);
+    await update24h(symbol);
 
-    // priming: fetch price imediatamente via REST para evitar zero/404 inicial
-    await pollPriceOnce(symbol);
-
+    // Candles
     pollCandles(symbol, interval);
     const timer = setInterval(() => pollCandles(symbol, interval), POLL_INTERVAL);
     trackers.set(key, timer);
     console.log(`🛠️  Iniciada monitoração de ${symbol}@${interval}`);
 }
 
-async function pollPriceOnce(symbol) {
-    const ts = (() => {
-        const d = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
-    })();
-    try {
-        const tick = await binance.prices({ symbol });
-        const p = parseFloat(tick[symbol]);
-        console.log(`[${ts}] pollPriceOnce para ${symbol} retornou ${p}`);
-        if (!isNaN(p) && p > 0) {
-            if (useRedis) await redisClient.hSet('prices', symbol, String(p));
-            priceStore.set(symbol, p);
-            console.log(`[${ts}] preço imediatamente armazenado para ${symbol}: ${p}`);
-        }
-    } catch (e) {
-        console.warn(`[${ts}] pollPriceOnce erro para ${symbol}:`, e.message || e);
-        // não crítico, será atualizado via ws
-    }
-}
-
+// ---------- Express ----------
 const app = express();
 
-// endpoints adicionais para dados de mercado centralizados
 app.get('/price', async (req, res) => {
-    const ts = (() => {
-        const d = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        return `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
-    })();
+    const ts = nowTs();
     const { symbol } = req.query;
     if (!symbol) return res.status(400).send('symbol é obrigatório');
-    let p;
     try {
-        if (useRedis) {
-            p = await redisClient.hGet('prices', symbol);
-        }
+        let p;
+        if (useRedis) p = await redisClient.hGet('prices', symbol);
         if (!p) p = priceStore.get(symbol);
-        // se não achamos nada, fazer um poll rápido extra para tentar obter
-        if (p === undefined || p === null) {
-            console.log(`[${ts}] /price sem valor para ${symbol}, forçando pollPriceOnce`);
-            await pollPriceOnce(symbol);
-            if (useRedis) {
-                p = await redisClient.hGet('prices', symbol);
-            }
-            if (!p) p = priceStore.get(symbol);
-        }
-        // não aceitaremos preço zero ou negativo
         if (p === undefined || p === null) {
             console.log(`[${ts}] /price ainda não disponível para ${symbol}`);
             return res.status(404).send('preço não disponível');
@@ -251,17 +182,6 @@ app.get('/price', async (req, res) => {
         const num = parseFloat(p);
         if (isNaN(num) || num <= 0) {
             console.log(`${ts} /price retornou valor inválido (${p}) para ${symbol}`);
-            // debug: mostrar o que está atualmente em cache
-            if (useRedis) {
-                try {
-                    const stored = await redisClient.hGet('prices', symbol);
-                    console.log(`${ts} [debug] Redis contém para ${symbol}: ${stored}`);
-                } catch (e) {
-                    console.warn(`${ts} [debug] falha ao ler Redis:`, e.message || e);
-                }
-            }
-            const memVal = priceStore.get(symbol);
-            console.log(`${ts} [debug] memória contém para ${symbol}: ${memVal}`);
             return res.status(404).send('preço inválido');
         }
         res.json({ price: num });
@@ -270,11 +190,12 @@ app.get('/price', async (req, res) => {
         res.status(500).send('erro interno');
     }
 });
+
 app.get('/stats24h', async (req, res) => {
     const { symbol } = req.query;
     if (!symbol) return res.status(400).send('symbol é obrigatório');
-    let data;
     try {
+        let data;
         if (useRedis) {
             const json = await redisClient.hGet('stats24h', symbol);
             if (json) data = JSON.parse(json);
@@ -282,8 +203,8 @@ app.get('/stats24h', async (req, res) => {
         if (!data) data = statsStore.get(symbol);
         if (!data) return res.status(404).send('stats vazio');
         res.json(data);
-    } catch (err) {
-        console.error('erro em /stats24h', err.message || err);
+    } catch (e) {
+        console.error('erro em /stats24h', e.message || e);
         res.status(500).send('erro interno');
     }
 });
@@ -292,35 +213,23 @@ app.get('/cache', async (req, res) => {
     const { symbol, interval } = req.query;
     if (!symbol || !interval) return res.status(400).send('symbol e interval são obrigatórios');
 
-    await trackSymbol(symbol, interval); // ensure priming done
-    const key = `candles:${symbol}:${interval}`;
-
-    // trackSymbol já dispara um poll imediato na primeira vez, portanto não
-    // precisamos chamar pollCandles() novamente aqui – isso evita duplicados.
-
     try {
+        const key = `candles:${symbol}:${interval}`;
+        // assegura que o rastreamento está ativo
+        if (!trackers.has(key)) await trackSymbol(symbol, interval);
+
         let data;
         if (useRedis) {
-            try {
-                data = await redisClient.get(key);
-            } catch (e) {
-                console.warn('Redis get falhou:', e.message || e);
-                useRedis = false;
-                data = null;
-            }
+            try { data = await redisClient.get(key); } catch (e) { console.warn('Redis get falhou:', e.message); useRedis = false; data = null; }
             if (!data) data = inMemoryStore.get(key);
         } else {
             data = inMemoryStore.get(key);
         }
         if (!data) return res.status(404).send('cache vazio');
-        try {
-            res.json(JSON.parse(data));
-        } catch (e) {
+        try { res.json(JSON.parse(data)); }
+        catch (e) {
             console.warn('JSON inválido lido do cache:', e.message);
-            // removemos chave corrompida para evitar a repetição do erro
-            try {
-                if (useRedis) redisClient.del(key).catch(() => { });
-            } catch (_) { }
+            try { if (useRedis) redisClient.del(key).catch(() => { }); } catch (_) { }
             inMemoryStore.delete(key);
             return res.status(404).send('cache vazio');
         }
@@ -330,13 +239,10 @@ app.get('/cache', async (req, res) => {
     }
 });
 
-// endpoint para consultar exchangeInfo (cache simples)
 app.get('/exchangeInfo', async (req, res) => {
     const { symbol } = req.query;
     try {
-        if (!exchangeInfoCache) {
-            exchangeInfoCache = await binance.exchangeInfo();
-        }
+        if (!exchangeInfoCache) exchangeInfoCache = await binance.exchangeInfo();
         if (symbol) {
             const info = exchangeInfoCache.symbols.find(s => s.symbol === symbol);
             if (!info) return res.status(404).send('symbol não encontrado');
@@ -349,7 +255,9 @@ app.get('/exchangeInfo', async (req, res) => {
     }
 });
 
-// endpoint para taxas de trade
+let exchangeInfoCache = null;
+let tradeFeeCache = { ts: 0, data: {} };
+
 app.get('/tradeFee', async (req, res) => {
     const { symbol } = req.query;
     if (!symbol) return res.status(400).send('symbol é obrigatório');
@@ -358,7 +266,6 @@ app.get('/tradeFee', async (req, res) => {
         if (tradeFeeCache.data[symbol] && (now - tradeFeeCache.ts < 10 * 60 * 1000)) {
             return res.json(tradeFeeCache.data[symbol]);
         }
-        // se não há credenciais, retornamos 204 em vez de 500
         if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_API_SECRET) {
             console.warn('tradeFee pedido mas sem credencial no servidor');
             return res.status(204).end();
@@ -373,13 +280,9 @@ app.get('/tradeFee', async (req, res) => {
     }
 });
 
-// não há mais handlers de stats duplicados; endpoints já definidos acima
-
+// ---------- Bootstrap ----------
 (async () => {
-    // log presence of credentials
-    const hasKey = !!process.env.BINANCE_API_KEY;
-    const hasSecret = !!process.env.BINANCE_API_SECRET;
-    if (!hasKey || !hasSecret) {
+    if (!process.env.BINANCE_API_KEY || !process.env.BINANCE_API_SECRET) {
         console.warn('⚠️ cacheServer iniciado SEM credenciais Binance (BINANCE_API_KEY/SECRET). `tradeFee` retornará 204.');
     } else {
         const mask = s => s ? `${s.slice(0, 4)}...${s.slice(-4)}` : 'n/a';
@@ -387,12 +290,11 @@ app.get('/tradeFee', async (req, res) => {
     }
 
     await createRedis();
-    // for compatibility with IPv4 clients (e.g. curl on Windows), bind to 0.0.0.0
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🔌 cacheServer rodando na porta ${PORT}`);
         console.log(`Usando Redis em ${REDIS_URL}`);
+        // auto-rastreamento removido; cada bot solicita seus símbolos via /cache
     });
 
-    // caso o Redis esteja indisponível no início, schedule reconnect
     if (!useRedis) scheduleRedisReconnect();
 })();

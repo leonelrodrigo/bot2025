@@ -123,11 +123,16 @@ const resetArg = process.argv.find(a => a.startsWith('--reset-id='));
 if (resetArg) {
     const idToReset = resetArg.split('=')[1];
     const statsFile = path.join(DATA_DIR, idToReset ? `${idToReset}_stats.json` : 'stats.json');
+    const stateFile = path.join(DATA_DIR, idToReset ? `${idToReset}_state.json` : 'state.json');
     if (fs.existsSync(statsFile)) {
         fs.writeFileSync(statsFile, JSON.stringify(defaultStats(), null, 2), 'utf8');
         console.log(`🔄 Stats do bot '${idToReset}' resetados.`);
     } else {
         console.warn(`Stats para bot '${idToReset}' não encontrados.`);
+    }
+    if (fs.existsSync(stateFile)) {
+        fs.unlinkSync(stateFile);
+        console.log(`🔄 Estado do bot '${idToReset}' resetado.`);
     }
     process.exit(0);
 }
@@ -137,8 +142,9 @@ if (removeArg) {
     const idToRemove = removeArg.split('=')[1];
     const cfgFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_config.json` : 'config.json');
     const statsFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_stats.json` : 'stats.json');
+    const stateFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_state.json` : 'state.json');
     const archiveDir = path.join(DATA_DIR, idToRemove ? `stats_archives_${idToRemove}` : 'stats_archives');
-    [cfgFile, statsFile].forEach(f => {
+    [cfgFile, statsFile, stateFile].forEach(f => {
         if (fs.existsSync(f)) fs.unlinkSync(f);
     });
     if (fs.existsSync(archiveDir)) {
@@ -158,10 +164,12 @@ BOT_ID = (() => {
 
 const CONFIG_FILENAME = BOT_ID ? `${BOT_ID}_config.json` : 'config.json';
 const STATS_FILENAME = BOT_ID ? `${BOT_ID}_stats.json` : 'stats.json';
+const STATE_FILENAME = BOT_ID ? `${BOT_ID}_state.json` : 'state.json';
 
 // if bot is referenced but its config doesn't exist yet, bootstrap skeleton files and exit
 const CONFIG_PATH = path.join(DATA_DIR, CONFIG_FILENAME);
 const STATS_PATH = path.join(DATA_DIR, STATS_FILENAME);
+const STATE_PATH = path.join(DATA_DIR, STATE_FILENAME);
 if (!fs.existsSync(CONFIG_PATH)) {
     // se existir um config base sem id, use como modelo
     const baseConfig = path.join(DATA_DIR, 'config.json');
@@ -195,6 +203,10 @@ if (!fs.existsSync(CONFIG_PATH)) {
     } else {
         fs.writeFileSync(STATS_PATH, JSON.stringify(defaultStats(), null, 2), 'utf8');
     }
+
+    // create a default persisted state file so the bot can resume after restart
+    fs.writeFileSync(STATE_PATH, JSON.stringify(defaultState(), null, 2), 'utf8');
+
     console.log(chalk.yellow(`🛠️  Configuração inicial criada em ${CONFIG_PATH}`));
     console.log(chalk.yellow(`Edite o arquivo e execute novamente para iniciar o bot.`));
     process.exit(0);
@@ -264,6 +276,97 @@ function saveStats(stats) {
     }
 }
 
+function defaultState() {
+    return {
+        tradeSide: null,
+        buyPrice: null,
+        sellPrice: null,
+        buyAmount: null,
+        sellAmount: null,
+        dca: null,
+    };
+}
+
+function loadState() {
+    try {
+        ensureDataDir();
+        const raw = fs.readFileSync(STATE_PATH, 'utf8');
+        return JSON.parse(raw);
+    } catch (e) {
+        return defaultState();
+    }
+}
+
+function saveState(state) {
+    try {
+        ensureDataDir();
+        fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+    } catch (e) {
+        console.error(`⚠️ Erro ao salvar ${STATE_FILENAME}:`, e.message);
+    }
+}
+
+function getCurrentState() {
+    const state = {
+        tradeSide,
+        buyPrice,
+        sellPrice,
+        buyAmount,
+        sellAmount,
+        dca: null,
+    };
+
+    if (dcaEnabled && dcaStrategy) {
+        const pos = dcaStrategy.getPositionInfo();
+        state.dca = {
+            ...pos,
+            lastActionPrice: dcaStrategy.lastActionPrice,
+        };
+    }
+
+    return state;
+}
+
+function restoreDcaState(saved) {
+    if (!saved || !saved.isActive) return null;
+
+    const dca = new DCAStrategy({
+        maxOrders: dcaMaxOrders,
+        targetPercent: dcaTargetPercent,
+        symbol,
+        base,
+        moeda,
+        strategy,
+        profitConfig: cfg.dca?.profitConfig || {},
+    });
+
+    // Restaurar campos essenciais do estado anterior
+    const keysToRestore = [
+        'positions',
+        'currentTargetPrice',
+        'initialPositionPrice',
+        'totalQuantity',
+        'totalCost',
+        'totalValue',
+        'averageEntryPrice',
+        'ordersCount',
+        'isActive',
+        'lastActionPrice',
+        'expectedProfit',
+        'expectedProfitPercent',
+        'profitPerOrder',
+        'weightedTargetPrice',
+    ];
+
+    for (const key of keysToRestore) {
+        if (saved[key] !== undefined) {
+            dca[key] = saved[key];
+        }
+    }
+
+    return dca;
+}
+
 // ─────────────────────────────────────────────
 // Inicializa configuração
 // ─────────────────────────────────────────────
@@ -287,6 +390,12 @@ let symbol = `${moeda}${base}`;
 
 let strategy = cfg.modo.strategy;
 let tradeSide = cfg.modo.tradeSide;
+
+// restaura estado persistido (último lado / preço de entrada / DCA)
+const persistedState = loadState();
+if (persistedState) {
+    if (persistedState.tradeSide) tradeSide = persistedState.tradeSide;
+}
 
 let TAX_MARKET = cfg.taxas.market;   // ex: 0.001 = 0.1%
 let TAX_LIMIT = cfg.taxas.limit;    // ex: 0.0005 = 0.05%
@@ -581,6 +690,20 @@ let balanceAmt = null;
 let balanceQty = null;
 let buyAmount = null;
 let sellAmount = null;
+
+// Restaura valores de posição caso o bot tenha sido reiniciado
+if (persistedState) {
+    if (persistedState.buyPrice != null) buyPrice = persistedState.buyPrice;
+    if (persistedState.sellPrice != null) sellPrice = persistedState.sellPrice;
+    if (persistedState.buyAmount != null) buyAmount = persistedState.buyAmount;
+    if (persistedState.sellAmount != null) sellAmount = persistedState.sellAmount;
+    if (dcaEnabled && persistedState.dca && persistedState.dca.isActive) {
+        dcaStrategy = restoreDcaState(persistedState.dca);
+        if (dcaStrategy && dcaStrategy.isActive) {
+            console.log(chalk.green(`✅ Estado DCA restaurado (ordens: ${dcaStrategy.ordersCount}/${1 + dcaStrategy.maxExtraOrders})`));
+        }
+    }
+}
 
 // qty of last executed orders, used when reinvestMode === 'equal'
 // eslint-disable-next-line no-unused-vars
@@ -1888,8 +2011,14 @@ async function monitor() {
             console.log(chalk.magentaBright('-----------------------------------'));
         }
 
+        // Persistir estado para poder retomar após restart/reboot
+        saveState(getCurrentState());
+
     } catch (error) {
         console.error('Erro no monitoramento:', error.message);
+    } finally {
+        // garante persistência mesmo em caso de erro temporário
+        saveState(getCurrentState());
     }
 }
 
