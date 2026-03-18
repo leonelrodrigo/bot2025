@@ -327,42 +327,39 @@ function getCurrentState() {
     return state;
 }
 
-function validatePersistedState() {
-    if (!persistedState) return;
+const eps = 1e-8;
+const hasQty = balanceQty != null && balanceQty > eps;
+const hasBase = balanceAmt != null && balanceAmt > eps;
+let inconsistent = false;
 
-    const eps = 1e-8;
-    const hasQty = balanceQty != null && balanceQty > eps;
-    const hasBase = balanceAmt != null && balanceAmt > eps;
-    let inconsistent = false;
+// Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
+if (strategy === 'LONG' && tradeSide === 'SELL') {
+    if (!hasQty) inconsistent = true;
+}
 
-    // Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
-    if (strategy === 'LONG' && tradeSide === 'SELL') {
-        if (!hasQty) inconsistent = true;
-    }
+// Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
+if (strategy === 'SHORT' && tradeSide === 'BUY') {
+    if (!hasBase) inconsistent = true;
+}
 
-    // Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
-    if (strategy === 'SHORT' && tradeSide === 'BUY') {
-        if (!hasBase) inconsistent = true;
-    }
-
-    // Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
-    if (persistedState.dca && persistedState.dca.isActive) {
-        if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
-            inconsistent = true;
-        }
-    }
-
-    if (inconsistent) {
-        console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
-        tradeSide = cfg.modo.tradeSide;
-        buyPrice = null;
-        sellPrice = null;
-        buyAmount = null;
-        sellAmount = null;
-        if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
-        saveState(defaultState());
+// Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
+if (persistedState.dca && persistedState.dca.isActive) {
+    if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
+        inconsistent = true;
     }
 }
+
+if (inconsistent) {
+    console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
+    tradeSide = cfg.modo.tradeSide;
+    buyPrice = null;
+    sellPrice = null;
+    buyAmount = null;
+    sellAmount = null;
+    if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
+    saveState(defaultState());
+}
+
 
 function restoreDcaState(saved) {
     if (!saved || !saved.isActive) return null;
@@ -2069,9 +2066,6 @@ async function monitor() {
     } catch (e) {
         console.warn('Aviso: falha ao atualizar saldo para validação de estado persistido:', e.message || e);
     }
-
-    // Valida o estado salvo e, se inconsistente, reseta para evitar trades incorretos
-    validatePersistedState();
 
     // Inicializa sessão nas stats (apenas na primeira execução)
     // Se a sessão anterior for de outro modo (DEMO vs REAL) ou par diferente, reinicializa sessão
