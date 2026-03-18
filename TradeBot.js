@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 const Binance = require('binance-api-node').default;
 const fetch = global.fetch || require('node-fetch'); // usa fetch nativo se disponível, ou pacote
 const DCAStrategy = require('./dcaStrategy.js');
@@ -223,11 +224,34 @@ function loadConfig() {
     }
 }
 
+function normalizeStats(raw) {
+    const base = defaultStats();
+    if (!raw || typeof raw !== 'object') return base;
+
+    return {
+        ...base,
+        ...raw,
+        sessao: {
+            ...base.sessao,
+            ...(raw.sessao || {}),
+        },
+        trades: {
+            ...base.trades,
+            ...(raw.trades || {}),
+        },
+        financeiro: {
+            ...base.financeiro,
+            ...(raw.financeiro || {}),
+        },
+        historico: Array.isArray(raw.historico) ? raw.historico : base.historico,
+    };
+}
+
 function loadStats() {
     try {
         ensureDataDir();
         const raw = fs.readFileSync(STATS_PATH, 'utf8');
-        return JSON.parse(raw);
+        return normalizeStats(JSON.parse(raw));
     } catch (e) {
         return defaultStats();
     }
@@ -327,39 +351,42 @@ function getCurrentState() {
     return state;
 }
 
-const eps = 1e-8;
-const hasQty = balanceQty != null && balanceQty > eps;
-const hasBase = balanceAmt != null && balanceAmt > eps;
-let inconsistent = false;
+function validatePersistedState() {
+    if (!persistedState) return;
 
-// Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
-if (strategy === 'LONG' && tradeSide === 'SELL') {
-    if (!hasQty) inconsistent = true;
-}
+    const eps = 1e-8;
+    const hasQty = balanceQty != null && balanceQty > eps;
+    const hasBase = balanceAmt != null && balanceAmt > eps;
+    let inconsistent = false;
 
-// Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
-if (strategy === 'SHORT' && tradeSide === 'BUY') {
-    if (!hasBase) inconsistent = true;
-}
+    // Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
+    if (strategy === 'LONG' && tradeSide === 'SELL') {
+        if (!hasQty) inconsistent = true;
+    }
 
-// Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
-if (persistedState.dca && persistedState.dca.isActive) {
-    if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
-        inconsistent = true;
+    // Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
+    if (strategy === 'SHORT' && tradeSide === 'BUY') {
+        if (!hasBase) inconsistent = true;
+    }
+
+    // Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
+    if (persistedState.dca && persistedState.dca.isActive) {
+        if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
+            inconsistent = true;
+        }
+    }
+
+    if (inconsistent) {
+        console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
+        tradeSide = cfg.modo.tradeSide;
+        buyPrice = null;
+        sellPrice = null;
+        buyAmount = null;
+        sellAmount = null;
+        if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
+        saveState(defaultState());
     }
 }
-
-if (inconsistent) {
-    console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
-    tradeSide = cfg.modo.tradeSide;
-    buyPrice = null;
-    sellPrice = null;
-    buyAmount = null;
-    sellAmount = null;
-    if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
-    saveState(defaultState());
-}
-
 
 function restoreDcaState(saved) {
     if (!saved || !saved.isActive) return null;
@@ -701,8 +728,6 @@ async function convertAssetToBase(asset, baseAsset) {
 // Variáveis Dinâmicas
 // ─────────────────────────────────────────────
 
-let stopLoss = false;
-
 let previousCandleClose = null;
 let currentPrice = null;
 let dailyLow = null;
@@ -737,7 +762,6 @@ if (persistedState) {
         }
     }
 }
-
 
 // accumulators for equal mode: sum of consecutive orders on each side
 let accumBuyQty = 0;
@@ -912,70 +936,140 @@ function logStats() {
 // ─────────────────────────────────────────────
 
 // Ajusta quantidade para respeitar LOT_SIZE (stepSize), minQty e minNotional (minAmt).
-function adjustQtyToFilters(requestQty, side) {
-    // se stepSize indefinido, tenta usar cache local por símbolo
-    if (!stepSize || !currentPrice || !minAmt || !minQty) {
-        const allCached = loadStepCache();
-        const cached = allCached[symbol];
-        if (cached && cached.stepSize) {
-            stepSize = cached.stepSize;
-            minQty = cached.minQty;
-            minAmt = cached.minAmt;
-            console.log(chalk.yellow('[CACHE] usando filtros locais para', symbol, ':',
-                `stepSize=${stepSize}`, `minQty=${minQty}`, `minAmt=${minAmt}`));
-            // continua com novos valores
-        } else {
+// Retorna `null` se não for possível montar uma ordem válida (ex.: minNotional não atingido).
+async function adjustQtyToFilters(requestQty, side) {
+    let triedRefresh = false;
+
+    while (true) {
+        // se stepSize/minQty/minAmt indefinidos, tenta recarregar via cache e, se possível, via cache server
+        if (!stepSize || !currentPrice || !minAmt || !minQty) {
+            try {
+                await updateMinOrderQty();
+            } catch (e) {
+                // fallback para cache local
+                const allCached = loadStepCache();
+                const cached = allCached[symbol];
+                if (cached && cached.stepSize) {
+                    stepSize = cached.stepSize;
+                    minQty = cached.minQty;
+                    minAmt = cached.minAmt;
+                    console.log(chalk.yellow('[CACHE] usando filtros locais para', symbol, ':',
+                        `stepSize=${stepSize}`, `minQty=${minQty}`, `minAmt=${minAmt}`));
+                }
+            }
+        }
+
+        if (!stepSize || !currentPrice || !minAmt || !minQty) {
+            // sem dados suficientes, não podemos validar
             try {
                 return parseFloat(requestQty.toFixed(8));
             } catch (e) {
                 return null;
             }
         }
-    }
 
-    const precision = Math.max(0, Math.ceil(-Math.log10(stepSize)));
-    // alinha para baixo ao stepSize
-    let q = Math.floor(requestQty / stepSize) * stepSize;
-    q = parseFloat(q.toFixed(precision));
+        const precision = Math.max(0, Math.ceil(-Math.log10(stepSize)));
 
-    // garante minQty
-    if (q < minQty) q = minQty;
+        // Garante que minQty é compatível com stepSize: se minQty for menor que o múltiplo mínimo,
+        // usamos o próximo múltiplo de stepSize para não violar o LOT_SIZE.
+        const minQtyAligned = Math.ceil(minQty / stepSize) * stepSize;
 
-    // aumenta até atingir minNotional
-    let guard = 0;
-    while ((q * currentPrice) < minAmt && guard < 100000) {
-        q = parseFloat((q + stepSize).toFixed(precision));
-        guard++;
-    }
-    if ((q * currentPrice) < minAmt) return null;
+        // alinha para baixo ao stepSize
+        let q = Math.floor(requestQty / stepSize) * stepSize;
+        q = parseFloat(q.toFixed(precision));
 
-    // para BUY: garante que o custo total (com taxa) caiba no saldo
-    if (side && side.toUpperCase() === 'BUY') {
-        const avail = DEMO ? demoBalance.base : balanceAmt;
-        const totalCost = q * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN;
-        if (totalCost > avail) {
-            // tenta reduzir para o máximo possível que caiba
-            let maxQ = Math.floor(((avail / (1 + TAX_MARKET)) / currentPrice) / stepSize) * stepSize;
-            maxQ = parseFloat(maxQ.toFixed(precision));
-            if (maxQ < minQty) return null;
-            if ((maxQ * currentPrice) < minAmt) return null;
-            return maxQ;
+        // se o arredondamento pelo stepSize ficou abaixo do mínimo aceito, usamos o mínimo válido.
+        if (q < minQtyAligned) q = minQtyAligned;
+
+        // aumenta até atingir minNotional
+        let guard = 0;
+        while ((q * currentPrice) < minAmt && guard < 100000) {
+            q = parseFloat((q + stepSize).toFixed(precision));
+            guard++;
         }
-    }
 
-    // para SELL: garante que quantidade não exceda saldo do ativo
-    if (side && side.toUpperCase() === 'SELL') {
-        const avail = DEMO ? demoBalance.moeda : balanceQty;
-        if (q > avail) {
-            let maxQ = Math.floor(avail / stepSize) * stepSize;
-            maxQ = parseFloat(maxQ.toFixed(precision));
-            if (maxQ < minQty) return null;
-            if ((maxQ * currentPrice) < minAmt) return null;
-            return maxQ;
+        if ((q * currentPrice) < minAmt) {
+            if (!triedRefresh) {
+                triedRefresh = true;
+                console.log(chalk.yellow('[ADJUST] minNotional não atingido, revalidando filtros (cache)'));
+                continue;
+            }
+            // não conseguimos chegar ao mínimo de notional, retorna null para evitar ordens inválidas
+            console.warn(chalk.yellow('[ADJUST] Não foi possível atingir minNotional', minAmt, 'com stepSize', stepSize, 'e price', currentPrice));
+            return null;
         }
-    }
 
-    return q;
+        // para BUY: garante que o custo total (com taxa) caiba no saldo
+        if (side && side.toUpperCase() === 'BUY') {
+            const avail = DEMO ? demoBalance.base : balanceAmt;
+            const totalCost = q * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN;
+            if (totalCost > avail) {
+                // tenta reduzir para o máximo possível que caiba (mantendo stepSize)
+                let maxQ = Math.floor(((avail / (1 + TAX_MARKET)) / currentPrice) / stepSize) * stepSize;
+                maxQ = parseFloat(maxQ.toFixed(precision));
+
+                // se o máximo possível for menor que o mínimo aceito, tenta usar o mínimo se ainda couber no saldo
+                if (maxQ < minQtyAligned) {
+                    const minCost = minQtyAligned * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN;
+                    if (minCost <= avail) {
+                        return minQtyAligned;
+                    }
+                    if (!triedRefresh) {
+                        triedRefresh = true;
+                        console.log(chalk.yellow('[ADJUST] Saldo insuficiente após ajuste, revalidando filtros (cache)'));
+                        continue;
+                    }
+                    return null;
+                }
+
+                if ((maxQ * currentPrice) < minAmt) {
+                    if (!triedRefresh) {
+                        triedRefresh = true;
+                        console.log(chalk.yellow('[ADJUST] maxQ ainda abaixo do minNotional, revalidando filtros (cache)'));
+                        continue;
+                    }
+                    return null;
+                }
+                return maxQ;
+            }
+        }
+
+        // para SELL: garante que quantidade não exceda saldo do ativo
+        if (side && side.toUpperCase() === 'SELL') {
+            const avail = DEMO ? demoBalance.moeda : balanceQty;
+            if (q > avail) {
+                let maxQ = Math.floor(avail / stepSize) * stepSize;
+                maxQ = parseFloat(maxQ.toFixed(precision));
+
+                if (maxQ < minQtyAligned) {
+                    // se o máximo possível for menor que o mínimo aceito, verifica se podemos usar o mínimo real
+                    if (minQtyAligned <= avail) {
+                        if ((minQtyAligned * currentPrice) >= minAmt) {
+                            return minQtyAligned;
+                        }
+                    }
+                    if (!triedRefresh) {
+                        triedRefresh = true;
+                        console.log(chalk.yellow('[ADJUST] Saldo insuficiente após ajuste, revalidando filtros (cache)'));
+                        continue;
+                    }
+                    return null;
+                }
+
+                if ((maxQ * currentPrice) < minAmt) {
+                    if (!triedRefresh) {
+                        triedRefresh = true;
+                        console.log(chalk.yellow('[ADJUST] maxQ ainda abaixo do minNotional, revalidando filtros (cache)'));
+                        continue;
+                    }
+                    return null;
+                }
+                return maxQ;
+            }
+        }
+
+        return q;
+    }
 }
 
 // Helper simples de retry para chamadas à API
@@ -1270,7 +1364,7 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
         isOrderPending = true;
 
         // Ajusta quantidade para respeitar filtros
-        let roundedQty = adjustQtyToFilters(quantity, side);
+        let roundedQty = await adjustQtyToFilters(quantity, side);
         if (!roundedQty || Number.isNaN(roundedQty) || roundedQty <= 0) {
             console.warn('Quantidade ajustada inválida ou insuficiente para respeitar filtros/minNotional. Ordem cancelada.');
             return null;
@@ -1622,6 +1716,15 @@ async function executeSellStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra SHORT: quantidade calculada ${quantity.toFixed(8)}`));
+
+                // A ordem precisa atingir o minNotional; se o stepSize fizer a quantidade ficar abaixo do mínimo,
+                // consideramos o minQty como base mínima para a verificação.
+                const qtyCheck = Math.max(quantity, minQty);
+                if (currentPrice && (qtyCheck * currentPrice) < minAmt) {
+                    console.log(chalk.yellow(`⚠️ DCA extra SHORT: valor ${(qtyCheck * currentPrice).toFixed(4)} abaixo do minNotional (${minAmt}). Ordem ignorada.`));
+                    return;
+                }
+
                 const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
                     console.log(chalk.green(`✅ DCA extra vendido: ${quantity} ${moeda}`));
@@ -1734,6 +1837,15 @@ async function executeBuyStrategy() {
             );
             if (quantity && quantity > 0) {
                 console.log(chalk.cyan(`📊 DCA extra LONG: quantidade calculada ${quantity.toFixed(8)}`));
+
+                // A ordem precisa atingir o minNotional; se o stepSize fizer a quantidade ficar abaixo do mínimo,
+                // consideramos o minQty como base mínima para a verificação.
+                const qtyCheck = Math.max(quantity, minQty);
+                if (currentPrice && (qtyCheck * currentPrice) < minAmt) {
+                    console.log(chalk.yellow(`⚠️ DCA extra LONG: valor ${(qtyCheck * currentPrice).toFixed(4)} abaixo do minNotional (${minAmt}). Ordem ignorada.`));
+                    return;
+                }
+
                 const order = await createOrder('BUY', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
                     console.log(chalk.green(`✅ DCA extra comprado: ${quantity} ${moeda}`));
@@ -2066,6 +2178,9 @@ async function monitor() {
     } catch (e) {
         console.warn('Aviso: falha ao atualizar saldo para validação de estado persistido:', e.message || e);
     }
+
+    // Valida o estado salvo e, se inconsistente, reseta para evitar trades incorretos
+    validatePersistedState();
 
     // Inicializa sessão nas stats (apenas na primeira execução)
     // Se a sessão anterior for de outro modo (DEMO vs REAL) ou par diferente, reinicializa sessão
