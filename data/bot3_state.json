@@ -1,8 +1,27 @@
 {
-  "tradeSide": "SELL",
+  "tradeSide": "BUY",
   "buyPrice": null,
-  "sellPrice": null,
+  "sellPrice": 2073.19,
   "buyAmount": null,
-  "sellAmount": null,
-  "dca": null
+  "sellAmount": 5.182975,
+  "dca": {
+    "isActive": true,
+    "ordersCount": 1,
+    "maxOrders": 4,
+    "averageEntryPrice": 2073.19,
+    "totalQuantity": 0.0025,
+    "totalCost": 5.182975,
+    "currentTargetPrice": 2069.04362,
+    "expectedProfit": 0.01036595,
+    "expectedProfitPercent": 0.2,
+    "positions": [
+      {
+        "price": 2073.19,
+        "quantity": 0.0025,
+        "timestamp": 1774555928569,
+        "amount": 5.182975
+      }
+    ],
+    "lastActionPrice": 2073.19
+  }
 }

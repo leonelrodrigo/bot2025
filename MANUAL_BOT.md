@@ -180,7 +180,11 @@ Esses valores podem ser alterados em runtime (config server observa arquivo e ap
 ### Reinvestimento
 - **`base`** – lucros ficam em `base` (ex: USDT/BRL). Quando uma nova ordem é feita, o bot injeta parte ou todo esse saldo de base para preservar o valor usado anteriormente; o restante permanece acumulado como lucro. Ideal quando você quer manter o capital em moeda base.
 - **`moeda`** – lucros são convertidos imediatamente para a `moeda` negociada e adicionados ao saldo. Não há banco de base; a quantidade de moeda cresce diretamente com o lucro.
-- **`equal`** – o bot tenta retornar à **mesma banca** utilizada na ordem anterior. ele usa o volume do último trade oposto ao calcular a próxima quantidade e, se a banca tiver caído, repõe a diferença usando lucro acumulado. o modo não cria novas conversões automáticas pretendendo apenas evitar a erosão da banca, deixando ganhos excedentes livres para acumular.
+- **`equal`** – o bot tenta retornar à **mesma banca** utilizada na ordem anterior. ele usa o volume do último trade oposto ao calcular a próxima quantidade e, se a banca tiver caído, repõe a diferença usando lucro acumulado (modo `profitBankBase`).
+  - para LONG, guarda o `targetBalanceBase` (base necessária para vooltar ao nível anterior). na próxima compra, se `accumBuyQty` estiver vazia, usa `targetBalanceBase/currentPrice` como fallback.
+  - para SHORT, guarda `targetBalanceQty` (quantidade de moeda da última saída). na próxima venda, se `accumSellQty` estiver vazia, usa esse alvo como fallback.
+  - quando o objetivo é alcançado por ajuste de saldo, o `targetBalance*` é zerado para não ser reaplicado indefinidamente.
+  - em DEMO e REAL o comportamento é o mesmo: o bot reutiliza o inventário acumulado e só adiciona lucro em `profitBankBase` se não estiver expandindo posição ativa.
 
 ### DCA (Dollar Cost Averaging)
 - Enquanto `dca.enabled`:

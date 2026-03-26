@@ -57,8 +57,6 @@
     "stopLossPercentLong": 0.5,
     "stopLossPercentShort": 0.5,
     "_comentario_pct_": "1.0 = 100% da posição; 0.5 = 50% da posição, etc.",
-    "pctCompra": 1.0,
-    "pctVenda": 1.0,
     "pctBaseLong": 1.0,
     "pctMoedaShort": 0.25
   },
