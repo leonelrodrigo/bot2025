@@ -1,20 +1,39 @@
 {
-  "tradeSide": "BUY",
-  "buyPrice": null,
+  "tradeSide": "SELL",
+  "buyPrice": 0.0769,
   "sellPrice": null,
-  "buyAmount": null,
+  "buyAmount": 98.0543,
   "sellAmount": null,
   "dca": {
-    "isActive": false,
-    "ordersCount": 0,
+    "isActive": true,
+    "ordersCount": 3,
     "maxOrders": 4,
-    "averageEntryPrice": 0,
-    "totalQuantity": 0,
-    "totalCost": 0,
-    "currentTargetPrice": 0,
-    "expectedProfit": 0,
-    "expectedProfitPercent": 0,
-    "positions": [],
-    "lastActionPrice": null
+    "averageEntryPrice": 0.07726895193065406,
+    "totalQuantity": 1269,
+    "totalCost": 98.0543,
+    "currentTargetPrice": 0.0774286094353651,
+    "expectedProfit": 0.202579552,
+    "expectedProfitPercent": 0.20662568951930654,
+    "positions": [
+      {
+        "price": 0.0773,
+        "quantity": 1138,
+        "timestamp": 1774588652316,
+        "amount": 87.9674
+      },
+      {
+        "price": 0.0771,
+        "quantity": 65,
+        "timestamp": 1774588712321,
+        "amount": 5.0115
+      },
+      {
+        "price": 0.0769,
+        "quantity": 66,
+        "timestamp": 1774589192457,
+        "amount": 5.0754
+      }
+    ],
+    "lastActionPrice": 0.0769
   }
 }

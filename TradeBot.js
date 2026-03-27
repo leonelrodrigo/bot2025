@@ -1883,11 +1883,22 @@ async function executeSellStrategy() {
                 cycleStartBalanceMoeda = DEMO ? demoBalance.moeda : balanceQty;
             }
 
+            // Para equal SHORT, permite 'reinvestir' profitBankBase (base) na quantidade de moeda
+            let effectiveBalance = DEMO ? demoBalance.moeda : balanceQty;
+            if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && targetBalanceQty > 0 && currentPrice > 0) {
+                const deficit = Math.max(0, targetBalanceQty - effectiveBalance);
+                if (deficit > 0 && profitBankBase > 0) {
+                    const canCover = Math.min(deficit, profitBankBase / currentPrice);
+                    effectiveBalance += canCover;
+                    // não consumir aqui ainda; consumo efetivo após ordens bem-sucedidas.
+                }
+            }
+
             if (cfg.operacao.reinvestMode === 'equal') {
                 // reopen with same volume as last opposite trade when available
                 quantity = getEqualQty('BUY') ||
                     Math.max(
-                        (cycleStartBalanceMoeda * pctMoedaShort) / (1 + TAX_MARKET),
+                        (effectiveBalance * pctMoedaShort) / (1 + TAX_MARKET),
                         Math.max(minQty, minQtyFromAmount)
                     );
                 console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
