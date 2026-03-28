@@ -437,7 +437,6 @@ let cfg = loadConfig();
 // if new reinvest settings absent, provide defaults
 cfg.operacao = cfg.operacao || {};
 cfg.operacao.reinvestProfits = cfg.operacao.reinvestProfits ?? false;
-cfg.operacao.reinvestMode = cfg.operacao.reinvestMode || 'base'; // 'base' or 'moeda'
 
 // log identifier if present
 if (BOT_ID) {
@@ -499,98 +498,150 @@ const SAFETY_MARGIN = 0.999;
 
 // lucro acumulado em `base` que ainda não foi reinvestido
 let profitBankBase = 0;
-// em modo equal armazenamos também um "objetivo" de banca que deve ser
-// retornado ao valor original antes de gastar mais lucro
-let targetBalanceBase = null;
-let targetBalanceQty = null;
 
 // helpers para balances que consideram reinvestimento
 function getEffectiveBalanceQty(currentPrice) {
     // quantidade disponível em modo real
-    let qty = DEMO ? demoBalance.moeda : balanceQty;
-    // Modo 'equal' não simula aqui — restauração é feita APÓS ordem executar
-    return qty;
+    return DEMO ? demoBalance.moeda : balanceQty;
 }
 
 function getEffectiveBalanceAmt(currentPrice) {
-    let amt = DEMO ? demoBalance.base : balanceAmt;
-
-    // reinvestMode 'base': incluir lucro se reinvestProfits ativo
-    // MAS em DEMO, lucro já foi incorporado em accumulateProfit()
-    if (cfg.operacao.reinvestProfits && cfg.operacao.reinvestMode === 'base' && profitBankBase > 0) {
-        if (DEMO) {
-            // DEMO: profitBankBase já está em demoBalance.base, apenas retornar
-        } else {
-            // REAL: adicionar profitBankBase ao saldo disponível
-            amt += profitBankBase;
-        }
-    }
-
-    // Modo 'equal' não simula aqui — restauração é feita APÓS ordem executar
-
-    return amt;
+    // quantidade disponível em modo real
+    return DEMO ? demoBalance.base : balanceAmt;
 }
 
+/**
+ * Nova lógica de acumulação de lucro sincronizada com a estratégia (LONG/SHORT):
+ * 
+ * LONG (comprador com base):
+ *   - reinvestProfits=true: Converter TODO lucro para base
+ *   - reinvestProfits=false: Guardar cycleStartBalanceBase, restaurar até lá com lucro, resto em profitBankBase
+ * 
+ * SHORT (vendedor com moeda):
+ *   - reinvestProfits=true: Converter TODO lucro para moeda
+ *   - reinvestProfits=false: Guardar cycleStartBalanceMoeda, restaurar até lá com lucro, resto em profitBankBase
+ */
 async function accumulateProfit(lucroBase) {
     // Sem lucro, sem ação
     if (lucroBase <= 0) return;
 
-    // Se reinvestProfits=false e não é equal, lucro fica no saldo mas não é processado
-    if (!cfg.operacao.reinvestProfits && cfg.operacao.reinvestMode !== 'equal') {
-        return;
-    }
+    console.log(chalk.magenta(`[REINVEST] strategy=${strategy} reinvestProfits=${cfg.operacao.reinvestProfits} lucroBase=${lucroBase.toFixed(8)}`));
 
-    // Modo 'moeda': converter lucro em ativo imediatamente (SIMETRIA DEMO/REAL)
-    if (cfg.operacao.reinvestMode === 'moeda' && cfg.operacao.reinvestProfits && currentPrice && !isNaN(currentPrice) && currentPrice > 0) {
-        const extra = lucroBase / currentPrice;
-
-        if (DEMO) {
-            // DEMO: ambos lados atualizados
-            demoBalance.moeda += extra;
-            demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
-            console.log(chalk.magenta(`[REINVEST] DEMO: lucro ${lucroBase.toFixed(8)} ${base} → ${extra.toFixed(8)} ${moeda}`));
-            return;
-        }
-
-        // REAL: executa ordem real Buy em moeda usando o lucro em base
-        if (balanceAmt <= 0) {
-            console.warn(chalk.yellow('[REINVEST] Saldo base insuficiente para reinvestir em moeda.'));
+    if (strategy === 'LONG') {
+        // ──── LONG: acumula capital em base (moeda de compra) ────
+        if (cfg.operacao.reinvestProfits) {
+            // Reinvestir: converter TODO lucro para base
+            // Em DEMO, lucro já está em base; em REAL, fazer nada pois lucro já é em base
+            profitBankBase += lucroBase;
+            console.log(chalk.magenta(`[REINVEST] LONG reinvest=true: acumulado ${lucroBase.toFixed(8)} ${base} no banco`));
         } else {
-            const quoteAmount = Math.min(lucroBase, balanceAmt);
-            try {
-                const reInvestOrder = await client.order({
-                    symbol,
-                    side: 'BUY',
-                    type: 'MARKET',
-                    quoteOrderQty: quoteAmount.toFixed(8),
-                    newOrderRespType: 'FULL',
-                });
-                console.log(chalk.magenta(`[REINVEST] REAL: ordem BUY de ${quoteAmount.toFixed(8)} ${base} em ${moeda} executada.`));
-                await balanceUpdt();
-            } catch (err) {
-                console.error(chalk.red('[REINVEST] Falha ao executar ordem real de reinvestimento (moeda):', err.message || err));
-                // Fallback contábil local para evitar perda de reinvestimento em caso de erro
-                balanceQty += extra;
-                balanceAmt = Math.max(0, balanceAmt - lucroBase);
-                console.log(chalk.magenta(`[REINVEST] REAL-fallback contábil: lucro ${lucroBase.toFixed(8)} ${base} → ${extra.toFixed(8)} ${moeda}`));
+            // Não reinvestir: manter cycleStartBalanceBase, resto em profitBankBase
+            const targetBase = cycleStartBalanceBase || 0;
+            const currentBase = DEMO ? demoBalance.base : balanceAmt;
+
+            if (currentBase < targetBase) {
+                // Usar parte do lucro para restaurar até targetBase
+                const perda = targetBase - currentBase;
+                const usado = Math.min(perda, lucroBase);
+
+                if (DEMO) {
+                    demoBalance.base += usado;
+                } else {
+                    balanceAmt += usado;
+                }
+
+                profitBankBase += Math.max(0, lucroBase - usado);
+                console.log(chalk.magenta(`[REINVEST] LONG reinvest=false: restaurado ${usado.toFixed(8)} ${base}, resto ${(lucroBase - usado).toFixed(8)} no banco`));
+            } else {
+                // Já temos base suficiente, todo lucro vai para o banco
+                profitBankBase += lucroBase;
+                console.log(chalk.magenta(`[REINVEST] LONG reinvest=false: base já restaurada, lucro ${lucroBase.toFixed(8)} no banco`));
             }
         }
+    } else if (strategy === 'SHORT') {
+        // ──── SHORT: acumula capital em moeda (ativo vendido) ────
+        if (cfg.operacao.reinvestProfits) {
+            // Reinvestir: converter TODO lucro para moeda usando BUY
+            if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) {
+                profitBankBase += lucroBase;
+                console.warn(chalk.yellow('[REINVEST] SHORT reinvest=true: preço inválido, aguardando para reinvestir.'));
+                return;
+            }
 
-        return;
-    }
+            const moedaExtra = lucroBase / currentPrice;
 
-    // Modo 'base': guardar lucro na banca se reinvestProfits ativo
-    if (cfg.operacao.reinvestMode === 'base' && cfg.operacao.reinvestProfits) {
-        profitBankBase += lucroBase;
-        console.log(chalk.magenta(`[REINVEST] ${DEMO ? 'DEMO' : 'REAL'}: lucro ${lucroBase.toFixed(8)} ${base} ao banco (base)`));
-        return;
-    }
+            // Verificar minNotional
+            if (lucroBase < minAmt) {
+                profitBankBase += lucroBase;
+                console.warn(chalk.yellow(`[REINVEST] SHORT reinvest=true: ${lucroBase.toFixed(8)} ${base} abaixo do minNotional, acumulando.`));
+                return;
+            }
 
-    // Modo 'equal': guardar lucro para restauração (NÃO depende de reinvestProfits)
-    if (cfg.operacao.reinvestMode === 'equal') {
-        profitBankBase += lucroBase;
-        console.log(chalk.magenta(`[REINVEST] ${DEMO ? 'DEMO' : 'REAL'}: lucro ${lucroBase.toFixed(8)} ${base} guardado (equal)`));
-        return;
+            if (DEMO) {
+                // DEMO: converter base para moeda
+                demoBalance.moeda += moedaExtra;
+                demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
+                console.log(chalk.magenta(`[REINVEST] DEMO SHORT reinvest=true: convertido ${lucroBase.toFixed(8)} ${base} → ${moedaExtra.toFixed(8)} ${moeda}`));
+            } else {
+                // REAL: executar ordem BUY
+                try {
+                    await client.order({
+                        symbol,
+                        side: 'BUY',
+                        type: 'MARKET',
+                        quoteOrderQty: lucroBase.toFixed(8),
+                        newOrderRespType: 'FULL',
+                    });
+                    console.log(chalk.magenta(`[REINVEST] REAL SHORT reinvest=true: ordem BUY de ${lucroBase.toFixed(8)} ${base} → ${moeda} executada.`));
+                    await balanceUpdt();
+                } catch (err) {
+                    const msg = (err && err.message) ? String(err.message).toLowerCase() : '';
+                    if (msg.includes('min_notional') || msg.includes('notional')) {
+                        profitBankBase += lucroBase;
+                        console.warn(chalk.yellow('[REINVEST] SHORT reinvest=true: MIN_NOTIONAL, acumulando.'));
+                    } else {
+                        // Fallback contábil
+                        balanceQty += moedaExtra;
+                        balanceAmt = Math.max(0, balanceAmt - lucroBase);
+                        console.error(chalk.red('[REINVEST] REAL SHORT reinvest=true: falha na ordem', err.message));
+                        console.log(chalk.magenta(`[REINVEST] Fallback: ${lucroBase.toFixed(8)} ${base} → ${moedaExtra.toFixed(8)} ${moeda}`));
+                    }
+                }
+            }
+        } else {
+            // Não reinvestir: manter cycleStartBalanceMoeda, resto em profitBankBase
+            const targetMoeda = cycleStartBalanceMoeda || 0;
+            const currentMoeda = DEMO ? demoBalance.moeda : balanceQty;
+
+            if (currentMoeda < targetMoeda) {
+                // Usar parte do lucro para comprar moeda e restaurar até targetMoeda
+                if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) {
+                    profitBankBase += lucroBase;
+                    console.warn(chalk.yellow('[REINVEST] SHORT reinvest=false: preço inválido, aguardando.'));
+                    return;
+                }
+
+                const deficit = targetMoeda - currentMoeda;
+                const necessario = deficit * currentPrice;
+                const usado = Math.min(necessario, lucroBase);
+                const moedaComprada = usado / currentPrice;
+
+                if (DEMO) {
+                    demoBalance.moeda += moedaComprada;
+                    demoBalance.base = Math.max(0, demoBalance.base - usado);
+                } else {
+                    balanceQty += moedaComprada;
+                    balanceAmt = Math.max(0, balanceAmt - usado);
+                }
+
+                profitBankBase += Math.max(0, lucroBase - usado);
+                console.log(chalk.magenta(`[REINVEST] SHORT reinvest=false: restaurado ${moedaComprada.toFixed(8)} ${moeda}, resto ${(lucroBase - usado).toFixed(8)} no banco`));
+            } else {
+                // Já temos moeda suficiente, todo lucro vai para o banco
+                profitBankBase += lucroBase;
+                console.log(chalk.magenta(`[REINVEST] SHORT reinvest=false: moeda já restaurada, lucro ${lucroBase.toFixed(8)} no banco`));
+            }
+        }
     }
 }
 
@@ -753,6 +804,7 @@ async function convertAssetToBase(asset, baseAsset) {
 // ─────────────────────────────────────────────
 
 let previousCandleClose = null;
+let previousCandleCloseInitialized = false;
 let currentPrice = null;
 let dailyLow = null;
 let dailyHigh = null;
@@ -787,36 +839,7 @@ if (persistedState) {
     }
 }
 
-// accumulators for equal mode: sum of consecutive orders on each side
-let accumBuyQty = 0;
-let accumSellQty = 0;
 
-// helper returns accumulated quantity for given side and clears it
-function getEqualQty(side) {
-    let qty = 0;
-    if (side === 'SELL') {
-        qty = accumSellQty;
-        accumSellQty = 0;
-    } else {
-        qty = accumBuyQty;
-        accumBuyQty = 0;
-    }
-
-    // Fallback equal mode: se não houver ordem acumulada, tenta usar targets
-    if (cfg.operacao.reinvestMode === 'equal' && (!qty || qty <= 0)) {
-        if (side === 'BUY' && targetBalanceQty != null && targetBalanceQty > 0) {
-            qty = targetBalanceQty;
-        } else if (side === 'SELL' && targetBalanceBase != null && currentPrice > 0) {
-            qty = targetBalanceBase / currentPrice;
-        }
-    }
-
-    if (cfg.operacao.reinvestMode === 'equal') {
-        console.log(chalk.magenta(`[REINVEST] equal mode getEqualQty(${side}) = ${qty.toFixed(8)}`));
-    }
-
-    return qty;
-}
 
 // ─────────────────────────────────────────────
 // Estado Demo
@@ -869,12 +892,10 @@ async function registrarTrade(side, entryPrice, exitPrice, qty, isStopLoss = fal
 
     const lucroPct = ((lucroLiquido / (entryPrice * qty)) * 100).toFixed(3);
 
-    // Atualiza estatísticas
+    // Atualiza estatísticas (metadados de trades e lucros, saldo será recalculado após reinvestimento)
     stats.trades.total++;
     stats.financeiro.taxasTotais = +(stats.financeiro.taxasTotais + taxaTotal).toFixed(8);
     stats.financeiro.lucroLiquidoTotal = +(stats.financeiro.lucroLiquidoTotal + lucroLiquido).toFixed(8);
-    stats.financeiro.saldoAtualBase = DEMO ? +demoBalance.base.toFixed(8) : balanceAmt;
-    stats.financeiro.saldoAtualMoeda = DEMO ? +demoBalance.moeda.toFixed(8) : balanceQty;
     if (isStopLoss) stats.trades.stopLossAcionados++;
 
     if (lucroLiquido >= 0) {
@@ -904,28 +925,14 @@ async function registrarTrade(side, entryPrice, exitPrice, qty, isStopLoss = fal
         modo: DEMO ? 'DEMO' : 'REAL',
     });
 
-    saveStats(stats);
-
     // se houver lucro e reinvestimento habilitado, acumula para o banco
     await accumulateProfit(lucroLiquido);
 
-    // modo equal: registrar o valor usado na ordem para que a banca possa ser
-    // reposta até esse nível na próxima rodada
-    if (cfg.operacao.reinvestMode === 'equal') {
-        if (strategy === 'LONG' && side === 'SELL') {
-            // quantia de base utilizada para comprar a moeda
-            targetBalanceBase = entryPrice * qty;
-            targetBalanceQty = null; // só base relevante para LONG equal
-        } else if (strategy === 'SHORT' && side === 'BUY') {
-            // quantidade de moeda usada para fechar a posição
-            targetBalanceQty = qty;
-            targetBalanceBase = null; // só qty relevante para SHORT equal
-        }
-    } else {
-        // ao sair do modo equal, não mantém targets antigos
-        targetBalanceBase = null;
-        targetBalanceQty = null;
-    }
+    // Atualiza o saldo atual depois do reinvestimento, para refletir DEMO/REAL corretamente
+    stats.financeiro.saldoAtualBase = DEMO ? +demoBalance.base.toFixed(8) : balanceAmt;
+    stats.financeiro.saldoAtualMoeda = DEMO ? +demoBalance.moeda.toFixed(8) : balanceQty;
+
+    saveStats(stats);
 
     // Reset ciclo: proxima ordem (base ou DCA) vai capturar novo saldo inicial
     cycleStartBalanceBase = null;
@@ -1221,7 +1228,6 @@ function applyConfig(newCfg) {
         // operacoes (reinvestimento) – revalida defaults
         cfg.operacao = cfg.operacao || {};
         cfg.operacao.reinvestProfits = cfg.operacao.reinvestProfits ?? false;
-        cfg.operacao.reinvestMode = cfg.operacao.reinvestMode || 'base';
 
         // monitoringInterval and other timing changes require restart to take full effect
         console.log(chalk.green('[CONFIG] Novas configurações aplicadas: pctBaseLong=' + pctBaseLong + ' pctMoedaShort=' + pctMoedaShort));
@@ -1254,15 +1260,25 @@ async function getLastCandle() {
             return null;
         }
         const arr = await resp.json();
-        if (Array.isArray(arr) && arr.length > 0) {
-            // O último elemento pode corresponder à vela em andamento (precio atual).
-            // Para variação usamos a vela ADIANTE, portanto preferimos o penúltimo valor quando houver.
-            if (arr.length >= 2) {
-                return parseFloat(arr[arr.length - 2]);
-            }
-            // fallback, única vela disponível
-            return parseFloat(arr[arr.length - 1]);
+        if (!Array.isArray(arr) || arr.length === 0) {
+            return null;
         }
+
+        // O último elemento pode ser vela em andamento.
+        // Para variação usamos a vela anterior (fechada), mas somente se há candles suficientes.
+        if (arr.length < 2) {
+            console.warn('[getLastCandle] candle insuficiente para variação (array length < 2).');
+            return null;
+        }
+
+        const prevClose = parseFloat(arr[arr.length - 2]);
+        if (Number.isNaN(prevClose)) {
+            console.warn('[getLastCandle] candle retornado inválido:', arr[arr.length - 2]);
+            return null;
+        }
+
+        console.log(chalk.gray(`[getLastCandle] usando candle fechado anterior: ${prevClose} (arr.length=${arr.length})`));
+        return prevClose;
     } catch (error) {
         console.error(`Erro ao obter candle de ${candleInterval}:`, error.message);
     }
@@ -1299,10 +1315,6 @@ async function balanceUpdt() {
             balanceAmt = parseFloat(balances.find(b => b.asset === base)?.free ?? '0');
             balanceQty = parseFloat(balances.find(b => b.asset === moeda)?.free ?? '0');
         }
-
-        // Nota: em modo 'equal', getEffectiveBalance*() já lida com restauração de banca
-        // usando targetBalanceBase/targetBalanceQty. Não precisa de reserveBase/reserveMoeda fixos.
-        // Esses targets são atualizados dinamicamente em registrarTrade().
 
         const tag = DEMO ? chalk.yellow('[DEMO] ') : '';
         console.log(`${tag}Saldo ${base}: ${balanceAmt.toFixed(4)} | ${moeda}: ${balanceQty}`);
@@ -1445,14 +1457,6 @@ async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = fals
         const execQty = parseFloat(order.executedQty);
         const execQuote = parseFloat(order.cummulativeQuoteQty);
         const avgPrice = execQuote / execQty;
-        // track for equal-mode reinvest
-        if (side.toUpperCase() === 'SELL') {
-            accumSellQty += execQty;
-            accumBuyQty = 0;
-        } else {
-            accumBuyQty += execQty;
-            accumSellQty = 0;
-        }
 
         // Atualiza saldo
         try {
@@ -1773,14 +1777,6 @@ async function executeSellStrategy() {
             // Obter saldo SEM consumir profitBankBase (apenas usar lucro se a ordem realmente executar)
             let availableBalance = DEMO ? demoBalance.moeda : balanceQty;
 
-            // Se em modo equal e temos target de moeda, tentar restaurar até lá
-            if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && targetBalanceQty > 0) {
-                const deficit = Math.max(0, targetBalanceQty - availableBalance);
-                if (deficit > 0 && profitBankBase > 0 && currentPrice > 0) {
-                    availableBalance += Math.min(deficit, profitBankBase / currentPrice);
-                }
-            }
-
             // DCA extra SHORT: usar mesmo percentual da ordem normal (pctMoedaShort)
             const quantity = Math.max(
                 (availableBalance * pctMoedaShort) / (1 + TAX_MARKET),
@@ -1799,14 +1795,6 @@ async function executeSellStrategy() {
 
                 const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
-                    // SÓ AGORA consumir o lucro usado, se em modo equal
-                    if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && targetBalanceQty > 0) {
-                        const deficit = Math.max(0, targetBalanceQty - (DEMO ? demoBalance.moeda : balanceQty));
-                        if (deficit > 0 && currentPrice > 0) {
-                            const used = Math.min(deficit * currentPrice, profitBankBase);
-                            profitBankBase -= used;
-                        }
-                    }
                     console.log(chalk.green(`✅ DCA extra vendido: ${quantity} ${moeda}`));
                 }
             }
@@ -1876,52 +1864,51 @@ async function executeSellStrategy() {
             console.log(`[${new Date().toLocaleTimeString()}] Variação: ${changePercentage.toFixed(2)}% | Ordem de Venda acionada`);
 
             let quantity;
-            const minQtyFromAmount = minAmt / currentPrice;  // unify minimum qty calculation
+            const minQtyFromAmount = minAmt / currentPrice;
 
-            // Captura saldo do ciclo na primeira ordem SELL (SHORT)
-            if (!cycleStartBalanceMoeda) {
-                cycleStartBalanceMoeda = DEMO ? demoBalance.moeda : balanceQty;
-            }
+            // LONG: está fechando a posição (vender moeda acumulada)
+            if (isClosingLong) {
+                // Deveria ter capturado cycleStartBalanceBase na ordem BUY inicial
+                const availableMoeda = DEMO ? demoBalance.moeda : balanceQty;
 
-            // Para equal SHORT, permite 'reinvestir' profitBankBase (base) na quantidade de moeda
-            let effectiveBalance = DEMO ? demoBalance.moeda : balanceQty;
-            if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && targetBalanceQty > 0 && currentPrice > 0) {
-                const deficit = Math.max(0, targetBalanceQty - effectiveBalance);
-                if (deficit > 0 && profitBankBase > 0) {
-                    const canCover = Math.min(deficit, profitBankBase / currentPrice);
-                    effectiveBalance += canCover;
-                    // não consumir aqui ainda; consumo efetivo após ordens bem-sucedidas.
-                }
-            }
-
-            if (cfg.operacao.reinvestMode === 'equal') {
-                // reopen with same volume as last opposite trade when available
-                quantity = getEqualQty('BUY') ||
-                    Math.max(
-                        (effectiveBalance * pctMoedaShort) / (1 + TAX_MARKET),
+                if (cfg.operacao.reinvestProfits) {
+                    // reinvestProfits=true: Vender TODA a moeda disponível
+                    quantity = Math.max(
+                        (availableMoeda * (1 - TAX_MARKET)),
                         Math.max(minQty, minQtyFromAmount)
                     );
-                console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
-            } else if (strategy === 'SHORT') {
-                quantity = Math.max((cycleStartBalanceMoeda * pctMoedaShort) / (1 + TAX_MARKET), Math.max(minQty, minQtyFromAmount));
+                    console.log(chalk.magenta(`[LONG CLOSE] reinvest=true: vendendo ${availableMoeda.toFixed(8)} ${moeda}`));
+                } else {
+                    // reinvestProfits=false: Vender apenas a moeda necessária, deixar base restaurada
+                    const targetBase = cycleStartBalanceBase || 0;
+                    const currentBase = DEMO ? demoBalance.base : balanceAmt;
+
+                    if (currentBase < targetBase) {
+                        const deficit = targetBase - currentBase;
+                        const necessario = deficit / currentPrice;
+                        quantity = Math.min(necessario, availableMoeda);
+                    } else {
+                        // Já temos base suficiente, vender tudo
+                        quantity = availableMoeda;
+                    }
+                    console.log(chalk.magenta(`[LONG CLOSE] reinvest=false: restaurando base até ${targetBase.toFixed(8)} ${base}`));
+                }
             } else {
+                // SHORT: entrada normal (captura ciclo na primeira ordem)
+                if (!cycleStartBalanceMoeda) {
+                    cycleStartBalanceMoeda = DEMO ? demoBalance.moeda : balanceQty;
+                }
                 quantity = Math.max((cycleStartBalanceMoeda * pctMoedaShort) / (1 + TAX_MARKET), Math.max(minQty, minQtyFromAmount));
             }
 
             const order = await createOrder('SELL', quantity, false, true);
 
             if (order) {
-                // ✅ CONSUMIR profitBankBase APENAS em modo 'equal' após ordem bem-sucedida
-                if (cfg.operacao.reinvestMode === 'equal' && targetBalanceQty != null && targetBalanceQty > 0) {
-                    const deficit = Math.max(0, targetBalanceQty - (DEMO ? demoBalance.moeda : balanceQty));
-                    if (deficit > 0 && currentPrice > 0) {
-                        const used = Math.min(deficit * currentPrice, profitBankBase);
-                        profitBankBase -= used;
-                        console.log(chalk.magenta(`[REINVEST/equal] consumed ${used.toFixed(8)} ${base} from profit bank`));
-                    }
+                // Se em fechamento LONG com reinvestProfits, consumir profitBankBase
+                if (isClosingLong && cfg.operacao.reinvestProfits && profitBankBase > 0) {
+                    profitBankBase = 0; // Todo profitBankBase foi recebido em base
+                    console.log(chalk.magenta(`[LONG CLOSE] profitBankBase consumido e recebido em base`));
                 }
-                // Modos 'base' e 'moeda': lucro já foi processado em accumulateProfit(), sem ação extra
-
                 // independente de DCA, após vender a lógica principal deve alternar o lado
                 tradeSide = 'BUY';
                 buyPrice = null;
@@ -1939,16 +1926,8 @@ async function executeBuyStrategy() {
         if (dcaStrategy.checkContraryMove(currentPrice)) {
             await balanceUpdt();
 
-            // Obter saldo SEM consumir profitBankBase (apenas usar lucro se a ordem realmente executar)
+            // Obter saldo disponível
             let availableBalance = DEMO ? demoBalance.base : balanceAmt;
-
-            // Se em modo equal e temos target, tentar restaurar até lá
-            if (cfg.operacao.reinvestMode === 'equal' && targetBalanceBase != null && targetBalanceBase > 0) {
-                const deficit = Math.max(0, targetBalanceBase - availableBalance);
-                if (deficit > 0 && profitBankBase > 0) {
-                    availableBalance += Math.min(deficit, profitBankBase);
-                }
-            }
 
             // DCA extra LONG: usar mesmo percentual da ordem normal (pctBaseLong)
             const quantity = Math.max(
@@ -1968,14 +1947,6 @@ async function executeBuyStrategy() {
 
                 const order = await createOrder('BUY', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
                 if (order) {
-                    // SÓ AGORA consumir o lucro usado, se em modo equal
-                    if (cfg.operacao.reinvestMode === 'equal' && targetBalanceBase != null && targetBalanceBase > 0) {
-                        const deficit = Math.max(0, targetBalanceBase - (DEMO ? demoBalance.base : balanceAmt));
-                        if (deficit > 0) {
-                            const used = Math.min(deficit, profitBankBase);
-                            profitBankBase -= used;
-                        }
-                    }
                     console.log(chalk.green(`✅ DCA extra comprado: ${quantity} ${moeda}`));
                 }
             }
@@ -2027,17 +1998,13 @@ async function executeBuyStrategy() {
             const minAmtQty = minAmt / currentPrice;
             let quantity;
 
-            if (cfg.operacao.reinvestMode === 'equal') {
-                quantity = getEqualQty('SELL');
-                if (!(quantity > 0)) {
-                    const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
-                    quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
-                }
-                console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
-            } else {
-                const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
-                quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
+            // Captura saldo do ciclo na primeira ordem BUY (LONG)
+            if (!cycleStartBalanceBase) {
+                cycleStartBalanceBase = DEMO ? demoBalance.base : balanceAmt;
             }
+
+            const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
+            quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
 
             const order = await createOrder('BUY', quantity, false, true);
 
@@ -2076,41 +2043,53 @@ async function executeBuyStrategy() {
             console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra acionada`);
 
             let quantity;
-            const minQtyFromAmount = minAmt / currentPrice;  // unify minimum qty calculation
+            const minQtyFromAmount = minAmt / currentPrice;
 
-            // Captura saldo do ciclo na primeira ordem BUY (LONG)
-            if (!cycleStartBalanceBase) {
-                cycleStartBalanceBase = DEMO ? demoBalance.base : balanceAmt;
-            }
+            // SHORT: está fechando a posição (restaurar moeda ao nível inicial)
+            if (isClosingShort) {
+                // Deveria ter capturado cycleStartBalanceMoeda na ordem SELL inicial
+                const targetMoeda = cycleStartBalanceMoeda || 0;
+                const currentMoeda = DEMO ? demoBalance.moeda : balanceQty;
+                const availableBase = DEMO ? demoBalance.base : balanceAmt;
 
-            if (cfg.operacao.reinvestMode === 'equal') {
-                // use accumulated opposite-side quantity
-                quantity = getEqualQty('SELL');
-                if (!(quantity > 0)) {
-                    const pct = pctBaseLong;  // sempre usar pctBaseLong (uniforme)
-                    quantity = Math.max((cycleStartBalanceBase * pct) / (currentPrice * (1 + TAX_MARKET)), Math.max(minQty, minQtyFromAmount));
+                if (cfg.operacao.reinvestProfits) {
+                    // reinvestProfits=true: Usar TODO o base disponível (lucro + reserva) para comprar moeda
+                    // Isso inclui profitBankBase que foi acumulado
+                    const totalBase = availableBase + profitBankBase;
+                    quantity = Math.max(
+                        (totalBase / (currentPrice * (1 + TAX_MARKET))),
+                        Math.max(minQty, minQtyFromAmount)
+                    );
+                    console.log(chalk.magenta(`[SHORT CLOSE] reinvest=true: usando ${totalBase.toFixed(8)} ${base} (disponível + banco)`));
+                } else {
+                    // reinvestProfits=false: Usar apenas o necessário para restaurar moeda até target
+                    if (currentMoeda < targetMoeda) {
+                        const deficit = targetMoeda - currentMoeda;
+                        const necessario = deficit * currentPrice * (1 + TAX_MARKET);
+                        const usar = Math.min(necessario, availableBase);
+                        quantity = usar / (currentPrice * (1 + TAX_MARKET));
+                    } else {
+                        // Já temos moeda suficiente, compra mínimo
+                        quantity = minQty;
+                    }
+                    console.log(chalk.magenta(`[SHORT CLOSE] reinvest=false: restaurando até ${targetMoeda.toFixed(8)} ${moeda}`));
                 }
-                console.log(chalk.magenta(`[REINVEST] equal mode: using qty ${quantity}`));
-            } else if (strategy === 'SHORT') {
-                quantity = Math.max((cycleStartBalanceBase * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), Math.max(minQty, minQtyFromAmount));
             } else {
+                // LONG: entrada normal (captura ciclo na primeira ordem)
+                if (!cycleStartBalanceBase) {
+                    cycleStartBalanceBase = DEMO ? demoBalance.base : balanceAmt;
+                }
                 quantity = Math.max((cycleStartBalanceBase * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), Math.max(minQty, minQtyFromAmount));
             }
 
             const order = await createOrder('BUY', quantity, false, true); // marca como fechamento ou ordem "normal"
 
             if (order) {
-                // ✅ CONSUMIR profitBankBase APENAS em modo 'equal' após ordem bem-sucedida
-                if (cfg.operacao.reinvestMode === 'equal' && targetBalanceBase != null && targetBalanceBase > 0) {
-                    const deficit = Math.max(0, targetBalanceBase - (DEMO ? demoBalance.base : balanceAmt));
-                    if (deficit > 0) {
-                        const used = Math.min(deficit, profitBankBase);
-                        profitBankBase -= used;
-                        console.log(chalk.magenta(`[REINVEST/equal] consumed ${used.toFixed(8)} ${base} from profit bank`));
-                    }
+                // Se em fechamento SHORT com reinvestProfits, consumir profitBankBase
+                if (isClosingShort && cfg.operacao.reinvestProfits && profitBankBase > 0) {
+                    profitBankBase = 0; // Todo profitBankBase foi convertido em moeda
+                    console.log(chalk.magenta(`[SHORT CLOSE] profitBankBase consumido e convertido em moeda`));
                 }
-                // Modos 'base' e 'moeda': lucro já foi processado em accumulateProfit(), sem ação extra
-
                 // após qualquer compra "normal" trocamos o lado para SELL
                 tradeSide = 'SELL';
                 sellPrice = null;
@@ -2158,7 +2137,16 @@ async function monitor() {
         }
 
         const newCandleClose = await getLastCandle();
-        if (newCandleClose) previousCandleClose = newCandleClose;
+        if (newCandleClose !== null) {
+            if (!previousCandleCloseInitialized) {
+                previousCandleClose = newCandleClose;
+                previousCandleCloseInitialized = true;
+                console.log(chalk.yellow('[monitor] candle inicial capturado; aguardando próximo ciclo para uso de variação.'));
+                // Não executar lógica de estratégia no primeiro ciclo com candle capturado para evitar comparação com fechamento antigo.
+                return;
+            }
+            previousCandleClose = newCandleClose;
+        }
 
         const rsiRaw = await updtRsi.getValue(symbol, candleInterval, rsiPeriod);
         if (rsiRaw === null || rsiRaw === undefined || Number.isNaN(Number(rsiRaw))) {

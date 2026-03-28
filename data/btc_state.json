@@ -4,17 +4,5 @@
   "sellPrice": null,
   "buyAmount": null,
   "sellAmount": null,
-  "dca": {
-    "isActive": false,
-    "ordersCount": 0,
-    "maxOrders": 4,
-    "averageEntryPrice": 0,
-    "totalQuantity": 0,
-    "totalCost": 0,
-    "currentTargetPrice": 0,
-    "expectedProfit": 0,
-    "expectedProfitPercent": 0,
-    "positions": [],
-    "lastActionPrice": null
-  }
+  "dca": null
 }

@@ -9,8 +9,7 @@
     },
     "operacao": {
         "reinvestProfits": false,
-        "_comentario": "Se true, o lucro será reinvestido de acordo com reinvestMode; se false, lucros são mantidos/exibidos (mas modo equal ainda pode compensar perdas de banca).",
-        "reinvestMode": "equal"
+        "_comentario": "Se true, o lucro é reinvestido automaticamente na moeda/base conforme estratégia; se false, capital inicial é restaurado com lucro, resto em profitBankBase."
     },
     "dca": {
         "enabled": false,

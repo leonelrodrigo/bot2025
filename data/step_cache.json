@@ -21,5 +21,15 @@
     "stepSize": 1,
     "minQty": 1,
     "minAmt": 5
+  },
+  "KITEUSDT": {
+    "stepSize": 0.1,
+    "minQty": 0.1,
+    "minAmt": 5
+  },
+  "ROBOUSDT": {
+    "stepSize": 1,
+    "minQty": 1,
+    "minAmt": 5
   }
 }
