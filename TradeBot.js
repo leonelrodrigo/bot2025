@@ -1,260 +1,166 @@
 /* eslint-disable no-unused-vars */
+// ─────────────────────────────────────────────────────────────────────────────
+// TradeBot.js — Versão 2.0
+// Estratégias LONG e SHORT | Modo DEMO e REAL | DCA integrado
+// ─────────────────────────────────────────────────────────────────────────────
+
+require('dotenv').config({ override: true });
+
 const Binance = require('binance-api-node').default;
-const fetch = global.fetch || require('node-fetch'); // usa fetch nativo se disponível, ou pacote
 const DCAStrategy = require('./dcaStrategy.js');
 const chalk = require('chalk');
 const updtRsi = require('./rsi.js');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 
-// URL do cache server centralizado (onde RSI, preços e stats estarão)
+// ─────────────────────────────────────────────────────────────────────────────
+// CONSTANTES GLOBAIS
+// ─────────────────────────────────────────────────────────────────────────────
+
 const CACHE_URL = process.env.CACHE_URL || `http://localhost:${process.env.CACHE_PORT || 4000}`;
-
-async function fetchCache(path, params = {}) {
-    const url = new URL(`${CACHE_URL}/${path}`);
-    Object.entries(params).forEach(([k, v]) => {
-        if (v !== undefined && v !== null) url.searchParams.append(k, v);
-    });
-    const res = await fetch(url.href);
-    if (!res.ok) throw new Error(`Cache server ${res.status} ${res.statusText}`);
-    if (res.status === 204) return null;
-    // some endpoints (e.g. tradeFee when no credenciais) may return 204
-    return res.json();
-}
-
-// ─────────────────────────────────────────────
-// Carrega configurações externas (config.json)
-// ─────────────────────────────────────────────
-
-// Identificador opcional para instâncias paralelas. Pode vir de env var ou argumento CLI `--id=...`.
-// também aceitamos `--remove-id=...` para apagar todos os artefatos de um bot e sair
-// `--list-bots` lista todos os IDs detectados
-// `--backup-id=...` copia arquivos e pastas do bot para um diretório de backup
-let BOT_ID = '';
-// definimos DATA_DIR cedo para permitir os comandos acima
 const DATA_DIR = path.join(__dirname, 'data');
-// arquivo local para cache de filtros por símbolo { symbol: { stepSize,minQty,minAmt } }
-const STEP_CACHE_PATH = path.join(DATA_DIR, 'step_cache.json');
+const SAFETY_MARGIN = 0.999; // margem para arredondamentos de saldo
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UTILITÁRIOS DE SISTEMA DE ARQUIVOS
+// ─────────────────────────────────────────────────────────────────────────────
+
 function ensureDataDir() {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 ensureDataDir();
 
-// --- helpers para cache local de filtros ----------------------------------------------
-// retorna mapa (pode ser {} se nenhum arquivo)
-function loadStepCache() {
+function readJson(filePath, fallback = null) {
     try {
-        if (fs.existsSync(STEP_CACHE_PATH)) {
-            const raw = fs.readFileSync(STEP_CACHE_PATH, 'utf8');
-            return JSON.parse(raw) || {};
-        }
+        if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch (e) {
-        console.warn('⚠️ falha ao ler cache de step size:', e.message);
+        console.warn(`⚠️  Falha ao ler ${filePath}: ${e.message}`);
     }
-    return {};
+    return fallback;
 }
 
-// salva mapa completo
-function saveStepCache(obj) {
+function writeJson(filePath, data) {
     try {
         ensureDataDir();
-        fs.writeFileSync(STEP_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
     } catch (e) {
-        console.warn('⚠️ falha ao gravar cache de step size:', e.message);
+        console.error(`⚠️  Falha ao gravar ${filePath}: ${e.message}`);
     }
 }
 
-// helper para cópia recursiva de diretório
 function copyDir(src, dest) {
     if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-    const entries = fs.readdirSync(src, { withFileTypes: true });
-    for (const ent of entries) {
-        const srcPath = path.join(src, ent.name);
-        const destPath = path.join(dest, ent.name);
-        if (ent.isDirectory()) {
-            copyDir(srcPath, destPath);
-        } else {
-            fs.copyFileSync(srcPath, destPath);
-        }
+    for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+        const s = path.join(src, ent.name), d = path.join(dest, ent.name);
+        ent.isDirectory() ? copyDir(s, d) : fs.copyFileSync(s, d);
     }
 }
 
-const listArg = process.argv.includes('--list-bots');
-if (listArg) {
-    ensureDataDir();
-    const entries = fs.readdirSync(DATA_DIR);
-    const ids = new Set();
-    entries.forEach((fn) => {
-        const m = fn.match(/^(.*)_(config|stats)\.json$/);
-        if (m) ids.add(m[1]);
-    });
-    if (entries.includes('config.json') || entries.includes('stats.json')) ids.add('');
-    console.log('Bots encontrados:');
-    ids.forEach((id) => console.log(id || '(default)'));
-    process.exit(0);
+function nowStr() {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return `[${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
 }
 
-const backupArg = process.argv.find(a => a.startsWith('--backup-id='));
-if (backupArg) {
-    const id = backupArg.split('=')[1];
-    ensureDataDir();
-    const destDir = path.join(DATA_DIR, `backup_${id || 'default'}_${Date.now()}`);
-    fs.mkdirSync(destDir, { recursive: true });
-    const names = [];
-    names.push(id ? `${id}_config.json` : 'config.json');
-    names.push(id ? `${id}_stats.json` : 'stats.json');
-    names.push(id ? `stats_archives_${id}` : 'stats_archives');
-    names.forEach(name => {
-        const src = path.join(DATA_DIR, name);
-        if (fs.existsSync(src)) {
-            const stat = fs.statSync(src);
-            if (stat.isDirectory()) {
-                copyDir(src, path.join(destDir, name));
-            } else {
-                fs.copyFileSync(src, path.join(destDir, name));
-            }
-        }
-    });
-    console.log(`🗃️  Backup do bot '${id}' salvo em ${destDir}`);
-    process.exit(0);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// ARGUMENTOS CLI
+// ─────────────────────────────────────────────────────────────────────────────
 
-const resetArg = process.argv.find(a => a.startsWith('--reset-id='));
-if (resetArg) {
-    const idToReset = resetArg.split('=')[1];
-    const statsFile = path.join(DATA_DIR, idToReset ? `${idToReset}_stats.json` : 'stats.json');
-    const stateFile = path.join(DATA_DIR, idToReset ? `${idToReset}_state.json` : 'state.json');
-    if (fs.existsSync(statsFile)) {
-        fs.writeFileSync(statsFile, JSON.stringify(defaultStats(), null, 2), 'utf8');
-        console.log(`🔄 Stats do bot '${idToReset}' resetados.`);
-    } else {
-        console.warn(`Stats para bot '${idToReset}' não encontrados.`);
-    }
-    if (fs.existsSync(stateFile)) {
-        fs.unlinkSync(stateFile);
-        console.log(`🔄 Estado do bot '${idToReset}' resetado.`);
-    }
-    process.exit(0);
-}
+function parseCLI() {
+    const args = process.argv.slice(2);
+    const get = prefix => (args.find(a => a.startsWith(prefix)) || '').split('=')[1] || '';
 
-const removeArg = process.argv.find(a => a.startsWith('--remove-id='));
-if (removeArg) {
-    const idToRemove = removeArg.split('=')[1];
-    const cfgFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_config.json` : 'config.json');
-    const statsFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_stats.json` : 'stats.json');
-    const stateFile = path.join(DATA_DIR, idToRemove ? `${idToRemove}_state.json` : 'state.json');
-    const archiveDir = path.join(DATA_DIR, idToRemove ? `stats_archives_${idToRemove}` : 'stats_archives');
-    [cfgFile, statsFile, stateFile].forEach(f => {
-        if (fs.existsSync(f)) fs.unlinkSync(f);
-    });
-    if (fs.existsSync(archiveDir)) {
-        fs.rmSync(archiveDir, { recursive: true, force: true });
-    }
-    console.log(`🗑️  Dados do bot '${idToRemove}' removidos.`);
-    process.exit(0);
-}
-
-BOT_ID = (() => {
-    // prioridade: argumento CLI --id=foo
-    const arg = process.argv.find(a => a.startsWith('--id='));
-    if (arg) return arg.split('=')[1];
-    if (process.env.BOT_ID) return process.env.BOT_ID;
-    return '';
-})();
-
-const CONFIG_FILENAME = BOT_ID ? `${BOT_ID}_config.json` : 'config.json';
-const STATS_FILENAME = BOT_ID ? `${BOT_ID}_stats.json` : 'stats.json';
-const STATE_FILENAME = BOT_ID ? `${BOT_ID}_state.json` : 'state.json';
-
-// if bot is referenced but its config doesn't exist yet, bootstrap skeleton files and exit
-const CONFIG_PATH = path.join(DATA_DIR, CONFIG_FILENAME);
-const STATS_PATH = path.join(DATA_DIR, STATS_FILENAME);
-const STATE_PATH = path.join(DATA_DIR, STATE_FILENAME);
-if (!fs.existsSync(CONFIG_PATH)) {
-    // se existir um config base sem id, use como modelo
-    const baseConfig = path.join(DATA_DIR, 'config.json');
-    if (fs.existsSync(baseConfig)) {
-        fs.copyFileSync(baseConfig, CONFIG_PATH);
-    } else {
-        const template = {
-            modo: {
-                demo: true,
-                base: "USDT",
-                moeda: "ETH",
-                strategy: "LONG",
-                tradeSide: "BUY"
-            },
-            taxas: { market: 0.001, limit: 0.0005 },
-            timing: { monitoringInterval: 30000, candleInterval: "15m", rsiPeriod: 14 },
-            rsi: { rsiBuy: 30, rsiSell: 70 },
-            alvos: { alvoBuy: 0, alvoSell: 0 },
-            seguranca: { secureTrend: 0, secureLow: 0, secureHigh: 0, stopLossPercentLong: 0, stopLossPercentShort: 0 },
-            demo_saldo_inicial: {
-                "base": 0.0,
-                moeda: 0.0
-            }
-        };
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(template, null, 2), 'utf8');
-    }
-    // stats similar: use existing base stats if present
-    const baseStats = path.join(DATA_DIR, 'stats.json');
-    if (fs.existsSync(baseStats)) {
-        fs.copyFileSync(baseStats, STATS_PATH);
-    } else {
-        fs.writeFileSync(STATS_PATH, JSON.stringify(defaultStats(), null, 2), 'utf8');
-    }
-
-    // create a default persisted state file so the bot can resume after restart
-    fs.writeFileSync(STATE_PATH, JSON.stringify(defaultState(), null, 2), 'utf8');
-
-    console.log(chalk.yellow(`🛠️  Configuração inicial criada em ${CONFIG_PATH}`));
-    console.log(chalk.yellow(`Edite o arquivo e execute novamente para iniciar o bot.`));
-    process.exit(0);
-}
-
-
-function loadConfig() {
-    try {
-        const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-        return JSON.parse(raw);
-    } catch (e) {
-        console.error(`❌ Erro ao carregar ${CONFIG_PATH}:`, e.message);
-        process.exit(1);
-    }
-}
-
-function normalizeStats(raw) {
-    const base = defaultStats();
-    if (!raw || typeof raw !== 'object') return base;
-
-    return {
-        ...base,
-        ...raw,
-        sessao: {
-            ...base.sessao,
-            ...(raw.sessao || {}),
-        },
-        trades: {
-            ...base.trades,
-            ...(raw.trades || {}),
-        },
-        financeiro: {
-            ...base.financeiro,
-            ...(raw.financeiro || {}),
-        },
-        historico: Array.isArray(raw.historico) ? raw.historico : base.historico,
-    };
-}
-
-function loadStats() {
-    try {
+    if (args.includes('--list-bots')) {
         ensureDataDir();
-        const raw = fs.readFileSync(STATS_PATH, 'utf8');
-        return normalizeStats(JSON.parse(raw));
-    } catch (e) {
-        return defaultStats();
+        const ids = new Set();
+        fs.readdirSync(DATA_DIR).forEach(f => {
+            const m = f.match(/^(.*?)_(config|stats|state)\.json$/);
+            if (m) ids.add(m[1]);
+        });
+        if (fs.existsSync(path.join(DATA_DIR, 'config.json'))) ids.add('(default)');
+        console.log('Bots encontrados:');
+        ids.forEach(id => console.log(` • ${id}`));
+        process.exit(0);
     }
+
+    const removeId = get('--remove-id=');
+    if (removeId !== undefined && args.some(a => a.startsWith('--remove-id='))) {
+        const prefix = removeId ? `${removeId}_` : '';
+        ['config', 'stats', 'state'].forEach(t => {
+            const f = path.join(DATA_DIR, `${prefix}${t}.json`);
+            if (fs.existsSync(f)) fs.unlinkSync(f);
+        });
+        const arch = path.join(DATA_DIR, removeId ? `stats_archives_${removeId}` : 'stats_archives');
+        if (fs.existsSync(arch)) fs.rmSync(arch, { recursive: true, force: true });
+        console.log(`🗑️  Dados do bot '${removeId || 'default'}' removidos.`);
+        process.exit(0);
+    }
+
+    const backupId = get('--backup-id=');
+    if (args.some(a => a.startsWith('--backup-id='))) {
+        ensureDataDir();
+        const dest = path.join(DATA_DIR, `backup_${backupId || 'default'}_${Date.now()}`);
+        fs.mkdirSync(dest, { recursive: true });
+        const prefix = backupId ? `${backupId}_` : '';
+        ['config', 'stats', 'state'].forEach(t => {
+            const f = path.join(DATA_DIR, `${prefix}${t}.json`);
+            if (fs.existsSync(f)) fs.copyFileSync(f, path.join(dest, path.basename(f)));
+        });
+        const arch = path.join(DATA_DIR, backupId ? `stats_archives_${backupId}` : 'stats_archives');
+        if (fs.existsSync(arch)) copyDir(arch, path.join(dest, path.basename(arch)));
+        console.log(`🗃️  Backup salvo em ${dest}`);
+        process.exit(0);
+    }
+
+    const resetId = get('--reset-id=');
+    if (args.some(a => a.startsWith('--reset-id='))) {
+        const prefix = resetId ? `${resetId}_` : '';
+        const sf = path.join(DATA_DIR, `${prefix}stats.json`);
+        const stf = path.join(DATA_DIR, `${prefix}state.json`);
+        if (fs.existsSync(sf)) writeJson(sf, defaultStats());
+        if (fs.existsSync(stf)) fs.unlinkSync(stf);
+        console.log(`🔄 Bot '${resetId || 'default'}' resetado.`);
+        process.exit(0);
+    }
+
+    const id = get('--id=') || process.env.BOT_ID || '';
+    return id;
+}
+
+const BOT_ID = parseCLI();
+const PREFIX = BOT_ID ? `${BOT_ID}_` : '';
+
+const CONFIG_PATH = path.join(DATA_DIR, `${PREFIX}config.json`);
+const STATS_PATH = path.join(DATA_DIR, `${PREFIX}stats.json`);
+const STATE_PATH = path.join(DATA_DIR, `${PREFIX}state.json`);
+const STEP_CACHE = path.join(DATA_DIR, 'step_cache.json');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ESQUEMAS PADRÃO
+// ─────────────────────────────────────────────────────────────────────────────
+
+function defaultConfig() {
+    return {
+        modo: { demo: true, base: 'USDT', moeda: 'ETH', strategy: 'LONG', tradeSide: 'BUY' },
+        taxas: { market: 0.001, limit: 0.0005 },
+        timing: { monitoringInterval: 30000, candleInterval: '15m', rsiPeriod: 14 },
+        rsi: { rsiBuy: 30, rsiSell: 70 },
+        alvos: { alvoBuy: 0, alvoSell: 0 },
+        seguranca: {
+            secureTrend: 0, secureLow: 0, secureHigh: 0,
+            stopLossPercentLong: 0, stopLossPercentShort: 0,
+            pctBaseLong: 0.25, pctMoedaShort: 0.25,
+        },
+        operacao: { reinvestProfits: false, reinvestMode: 'equal' },
+        dca: {
+            enabled: false, maxOrders: 3, targetPercent: 0.25,
+            adaptiveStopLoss: true, stopLossBuffer: 1.5,
+            profitConfig: {
+                baseProfit: 0.25, extraOrderMultiplier: 1.2,
+                minTotalProfit: 0.25, maxTotalProfit: 1.0,
+            },
+        },
+        demo_saldo_inicial: { USDT: 1000, moeda: 0 },
+    };
 }
 
 function defaultStats() {
@@ -262,42 +168,13 @@ function defaultStats() {
         sessao: { inicio: null, modo: null, symbol: null },
         trades: { total: 0, lucrativos: 0, prejuizo: 0, stopLossAcionados: 0 },
         financeiro: {
-            lucroLiquidoTotal: 0,
-            taxasTotais: 0,
-            maiorLucroTrade: 0,
-            maiorPrejuizoTrade: 0,
-            saldoInicialBase: null,
-            saldoAtualBase: null,
-            // campos extras para acompanhar balanço em moeda (úteis em SHORT)
-            saldoInicialMoeda: null,
-            saldoAtualMoeda: null,
+            lucroLiquidoTotal: 0, taxasTotais: 0,
+            maiorLucroTrade: 0, maiorPrejuizoTrade: 0,
+            saldoInicialBase: null, saldoAtualBase: null,
+            saldoInicialMoeda: null, saldoAtualMoeda: null,
         },
         historico: [],
     };
-}
-
-function archiveStats(statsObj) {
-    try {
-        const archiveDirName = BOT_ID ? `stats_archives_${BOT_ID}` : 'stats_archives';
-        const archiveDir = path.join(DATA_DIR, archiveDirName);
-        if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir);
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const archivePath = path.join(archiveDir, `stats_${ts}.json`);
-        fs.writeFileSync(archivePath, JSON.stringify(statsObj, null, 2), 'utf8');
-        console.log(chalk.blue(`📦 Arquivo de stats arquivado em ${archivePath}`));
-    } catch (err) {
-        console.error('Erro ao arquivar stats:', err.message || err);
-    }
-}
-
-function saveStats(stats) {
-    try {
-        // garantir que a pasta de dados exista caso tenha sido removida durante execução
-        ensureDataDir();
-        fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), 'utf8');
-    } catch (e) {
-        console.error(`⚠️ Erro ao salvar ${STATS_FILENAME}:`, e.message);
-    }
 }
 
 function defaultState() {
@@ -307,158 +184,92 @@ function defaultState() {
         sellPrice: null,
         buyAmount: null,
         sellAmount: null,
-        dca: null,
+        // campos adicionados na v2 — ausentes em states antigos são migrados por normalizeState()
+        cycleStartBalanceBase: null,
+        cycleStartBalanceMoeda: null,
+        profitBankBase: 0,
+        dca: {
+            isActive: false,
+            ordersCount: 0,
+            maxOrders: 4,
+            averageEntryPrice: 0,
+            totalQuantity: 0,
+            totalCost: 0,
+            currentTargetPrice: 0,
+            expectedProfit: 0,
+            expectedProfitPercent: 0,
+            positions: [],
+            lastActionPrice: null,
+        },
     };
 }
 
-function loadState() {
-    try {
-        ensureDataDir();
-        const raw = fs.readFileSync(STATE_PATH, 'utf8');
-        return JSON.parse(raw);
-    } catch (e) {
-        return defaultState();
-    }
-}
-
-function saveState(state) {
-    try {
-        ensureDataDir();
-        fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
-    } catch (e) {
-        console.error(`⚠️ Erro ao salvar ${STATE_FILENAME}:`, e.message);
-    }
-}
-
-function getCurrentState() {
-    const state = {
-        tradeSide,
-        buyPrice,
-        sellPrice,
-        buyAmount,
-        sellAmount,
-        dca: null,
+// Migração suave: aceita states antigos (sem campos v2) e states novos.
+// Nunca lança exceção — em pior caso retorna o default.
+function normalizeState(raw) {
+    const def = defaultState();
+    if (!raw || typeof raw !== 'object') return def;
+    return {
+        tradeSide: raw.tradeSide ?? def.tradeSide,
+        buyPrice: raw.buyPrice ?? def.buyPrice,
+        sellPrice: raw.sellPrice ?? def.sellPrice,
+        buyAmount: raw.buyAmount ?? def.buyAmount,
+        sellAmount: raw.sellAmount ?? def.sellAmount,
+        // campos v2: se ausentes no state antigo, inicializa com default (migração automática)
+        cycleStartBalanceBase: raw.cycleStartBalanceBase ?? def.cycleStartBalanceBase,
+        cycleStartBalanceMoeda: raw.cycleStartBalanceMoeda ?? def.cycleStartBalanceMoeda,
+        profitBankBase: typeof raw.profitBankBase === 'number' ? raw.profitBankBase : def.profitBankBase,
+        // dca: merge profundo para preservar campos do state antigo
+        dca: raw.dca != null ? { ...def.dca, ...raw.dca } : def.dca,
     };
-
-    if (dcaEnabled && dcaStrategy) {
-        const pos = dcaStrategy.getPositionInfo();
-        state.dca = {
-            ...pos,
-            lastActionPrice: dcaStrategy.lastActionPrice,
-        };
-    }
-
-    return state;
 }
 
-function validatePersistedState() {
-    if (!persistedState) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// BOOTSTRAP DE CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
 
-    const eps = 1e-8;
-    const hasQty = balanceQty != null && balanceQty > eps;
-    const hasBase = balanceAmt != null && balanceAmt > eps;
-    let inconsistent = false;
-
-    // Para LONG, quando tradeSide == SELL, esperamos ter moeda (posição aberta)
-    if (strategy === 'LONG' && tradeSide === 'SELL') {
-        if (!hasQty) inconsistent = true;
-    }
-
-    // Para SHORT, quando tradeSide == BUY, esperamos ter base (para fechar a posição)
-    if (strategy === 'SHORT' && tradeSide === 'BUY') {
-        if (!hasBase) inconsistent = true;
-    }
-
-    // Se há info de DCA ativa, valida que a estratégia esteja realmente ativa
-    if (persistedState.dca && persistedState.dca.isActive) {
-        if (!dcaStrategy || !dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0) {
-            inconsistent = true;
-        }
-    }
-
-    if (inconsistent) {
-        console.warn('⚠️ Estado persistido inconsistente com o saldo atual. Resetando estado para evitar trades incorretos.');
-        tradeSide = cfg.modo.tradeSide;
-        buyPrice = null;
-        sellPrice = null;
-        buyAmount = null;
-        sellAmount = null;
-        if (dcaStrategy) dcaStrategy.cancel('Estado inconsistente ao iniciar');
-        saveState(defaultState());
-    }
+if (!fs.existsSync(CONFIG_PATH)) {
+    const base = path.join(DATA_DIR, 'config.json');
+    writeJson(CONFIG_PATH, fs.existsSync(base) ? readJson(base) : defaultConfig());
+    writeJson(STATS_PATH, defaultStats());
+    writeJson(STATE_PATH, defaultState());
+    if (BOT_ID) console.log(chalk.yellow(`🔖 Bot ID: ${BOT_ID}`));
+    console.log(chalk.yellow(`🛠️  Config criada em ${CONFIG_PATH}. Edite e execute novamente.`));
+    process.exit(0);
 }
 
-function restoreDcaState(saved) {
-    if (!saved || !saved.isActive) return null;
+// ─────────────────────────────────────────────────────────────────────────────
+// CARREGA CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
 
-    const dca = new DCAStrategy({
-        maxOrders: dcaMaxOrders,
-        targetPercent: dcaTargetPercent,
-        symbol,
-        base,
-        moeda,
-        strategy,
-        profitConfig: cfg.dca?.profitConfig || {},
-    });
-
-    // Restaurar campos essenciais do estado anterior
-    const keysToRestore = [
-        'positions',
-        'currentTargetPrice',
-        'initialPositionPrice',
-        'totalQuantity',
-        'totalCost',
-        'totalValue',
-        'averageEntryPrice',
-        'ordersCount',
-        'isActive',
-        'lastActionPrice',
-        'expectedProfit',
-        'expectedProfitPercent',
-        'profitPerOrder',
-        'weightedTargetPrice',
-    ];
-
-    for (const key of keysToRestore) {
-        if (saved[key] !== undefined) {
-            dca[key] = saved[key];
-        }
-    }
-
-    return dca;
+function loadConfig() {
+    const raw = readJson(CONFIG_PATH);
+    if (!raw) { console.error(`❌ Erro ao carregar ${CONFIG_PATH}`); process.exit(1); }
+    // garante sub-objetos obrigatórios com defaults
+    raw.operacao = raw.operacao || {};
+    raw.operacao.reinvestProfits = raw.operacao.reinvestProfits ?? false;
+    raw.operacao.reinvestMode = raw.operacao.reinvestMode ?? 'equal';
+    raw.dca = raw.dca || {};
+    raw.dca.profitConfig = raw.dca.profitConfig || {};
+    return raw;
 }
-
-// ─────────────────────────────────────────────
-// Inicializa configuração
-// ─────────────────────────────────────────────
 
 let cfg = loadConfig();
 
-// if new reinvest settings absent, provide defaults
-cfg.operacao = cfg.operacao || {};
-cfg.operacao.reinvestProfits = cfg.operacao.reinvestProfits ?? false;
+if (BOT_ID) console.log(chalk.yellow(`🔖 Bot ID: ${BOT_ID}`));
 
-// log identifier if present
-if (BOT_ID) {
-    console.log(chalk.yellow(`🔖 Bot ID: ${BOT_ID} (usando arquivos ${CONFIG_FILENAME} / ${STATS_FILENAME})`));
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// VARIÁVEIS DE CONFIG (mutáveis via hot-reload)
+// ─────────────────────────────────────────────────────────────────────────────
 
 let DEMO = cfg.modo.demo;
 let base = cfg.modo.base;
 let moeda = cfg.modo.moeda;
 let symbol = `${moeda}${base}`;
+let strategy = cfg.modo.strategy;   // 'LONG' | 'SHORT'
 
-let strategy = cfg.modo.strategy;
-let tradeSide = cfg.modo.tradeSide;
-
-// restaura estado persistido (último lado / preço de entrada / DCA)
-const persistedState = loadState();
-if (persistedState) {
-    if (persistedState.tradeSide) tradeSide = persistedState.tradeSide;
-}
-
-let TAX_MARKET = cfg.taxas.market;   // ex: 0.001 = 0.1%
-let TAX_LIMIT = cfg.taxas.limit;    // ex: 0.0005 = 0.05%
+let TAX_MARKET = cfg.taxas.market;
+let TAX_LIMIT = cfg.taxas.limit;
 
 let monitoringInterval = cfg.timing.monitoringInterval;
 let candleInterval = cfg.timing.candleInterval;
@@ -466,438 +277,595 @@ let rsiPeriod = cfg.timing.rsiPeriod;
 
 let rsiBuy = cfg.rsi.rsiBuy;
 let rsiSell = cfg.rsi.rsiSell;
-
-let alvoSell = cfg.alvos.alvoSell;
 let alvoBuy = cfg.alvos.alvoBuy;
+let alvoSell = cfg.alvos.alvoSell;
 
 let secureTrend = cfg.seguranca.secureTrend;
 let secureLow = cfg.seguranca.secureLow;
 let secureHigh = cfg.seguranca.secureHigh;
 let stopLossPercentLong = cfg.seguranca.stopLossPercentLong;
 let stopLossPercentShort = cfg.seguranca.stopLossPercentShort;
-// Percentual do saldo INICIAL DO CICLO para cada ordem (base + DCA usam mesmo % do capital)
-let pctBaseLong = (cfg.seguranca && cfg.seguranca.pctBaseLong !== undefined) ? parseFloat(cfg.seguranca.pctBaseLong) : 0.25;
-let pctMoedaShort = (cfg.seguranca && cfg.seguranca.pctMoedaShort !== undefined) ? parseFloat(cfg.seguranca.pctMoedaShort) : 0.25;
+let pctBaseLong = parseFloat(cfg.seguranca.pctBaseLong ?? 0.25);
+let pctMoedaShort = parseFloat(cfg.seguranca.pctMoedaShort ?? 0.25);
 
-// ─────────────────────────────────────────────
-// Rastreamento de ciclo: saldo inicial capturado na 1ª ordem, reutilizado por base + DCAs
-// ─────────────────────────────────────────────
-let cycleStartBalanceBase = null;  // USDT capturado ao abrir ciclo LONG (BUY)
-let cycleStartBalanceMoeda = null; // moeda capturada ao abrir ciclo SHORT (SELL)
-
-// Configurações da estratégia DCA (adicionar após carregar o cfg)
 let dcaEnabled = cfg.dca?.enabled || false;
 let dcaMaxOrders = cfg.dca?.maxOrders || 3;
-let dcaTargetPercent = cfg.dca?.targetPercent || 0.5;
+let dcaTargetPercent = cfg.dca?.targetPercent || 0.25;
 
-// Variável para estratégia DCA
-let dcaStrategy = null;
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTADO DE RUNTIME
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Margem de segurança para evitar falhas por arredondamento
-const SAFETY_MARGIN = 0.999;
+let currentPrice = null;
+let rsi = null;
+let trend = null;
+let dailyLow = null;
+let dailyHigh = null;
+let previousCandleClose = null;
+let candleInitialized = false;
+let isOrderPending = false;
 
-// lucro acumulado em `base` que ainda não foi reinvestido
+// saldos reais (REAL) ou espelhados do demo
+let balanceAmt = null;   // base  (ex: USDT)
+let balanceQty = null;   // moeda (ex: ETH)
+
+// filtros de ordem
+let minQty = null;
+let minAmt = null;
+let stepSize = null;
+
+// posição atual
+let tradeSide = cfg.modo.tradeSide;
+let buyPrice = null;
+let sellPrice = null;
+let buyAmount = null;
+let sellAmount = null;
+
+// rastreamento de ciclo (capturado na primeira ordem de cada ciclo)
+let cycleStartBalanceBase = null;
+let cycleStartBalanceMoeda = null;
+
+// banco de lucros acumulados aguardando tamanho mínimo para operar
 let profitBankBase = 0;
 
-// helpers para balances que consideram reinvestimento
-function getEffectiveBalanceQty(currentPrice) {
-    // quantidade disponível em modo real
-    return DEMO ? demoBalance.moeda : balanceQty;
-}
+// DCA
+let dcaStrategy = null;
 
-function getEffectiveBalanceAmt(currentPrice) {
-    // quantidade disponível em modo real
-    return DEMO ? demoBalance.base : balanceAmt;
-}
+// taxas por símbolo
+let tradeFeePerSymbol = {};
+let tradeFeeCache = { ts: 0, data: null };
 
-/**
- * Nova lógica de acumulação de lucro sincronizada com a estratégia (LONG/SHORT):
- * 
- * LONG (comprador com base):
- *   - reinvestProfits=true: Converter TODO lucro para base
- *   - reinvestProfits=false: Guardar cycleStartBalanceBase, restaurar até lá com lucro, resto em profitBankBase
- * 
- * SHORT (vendedor com moeda):
- *   - reinvestProfits=true: Converter TODO lucro para moeda
- *   - reinvestProfits=false: Guardar cycleStartBalanceMoeda, restaurar até lá com lucro, resto em profitBankBase
- */
-async function accumulateProfit(lucroBase) {
-    // Sem lucro, sem ação
-    if (lucroBase <= 0) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// SALDO DEMO
+// ─────────────────────────────────────────────────────────────────────────────
 
-    console.log(chalk.magenta(`[REINVEST] strategy=${strategy} reinvestProfits=${cfg.operacao.reinvestProfits} lucroBase=${lucroBase.toFixed(8)}`));
+const demoBalance = {
+    base: cfg.demo_saldo_inicial?.[base] ?? cfg.demo_saldo_inicial?.base ?? 1000,
+    moeda: cfg.demo_saldo_inicial?.moeda ?? 0,
+};
 
-    if (strategy === 'LONG') {
-        // ──── LONG: acumula capital em base (moeda de compra) ────
-        if (cfg.operacao.reinvestProfits) {
-            // Reinvestir: converter TODO lucro para base
-            // Em DEMO, lucro já está em base; em REAL, fazer nada pois lucro já é em base
-            profitBankBase += lucroBase;
-            console.log(chalk.magenta(`[REINVEST] LONG reinvest=true: acumulado ${lucroBase.toFixed(8)} ${base} no banco`));
-        } else {
-            // Não reinvestir: manter cycleStartBalanceBase, resto em profitBankBase
-            const targetBase = cycleStartBalanceBase || 0;
-            const currentBase = DEMO ? demoBalance.base : balanceAmt;
-
-            if (currentBase < targetBase) {
-                // Usar parte do lucro para restaurar até targetBase
-                const perda = targetBase - currentBase;
-                const usado = Math.min(perda, lucroBase);
-
-                if (DEMO) {
-                    demoBalance.base += usado;
-                } else {
-                    balanceAmt += usado;
-                }
-
-                profitBankBase += Math.max(0, lucroBase - usado);
-                console.log(chalk.magenta(`[REINVEST] LONG reinvest=false: restaurado ${usado.toFixed(8)} ${base}, resto ${(lucroBase - usado).toFixed(8)} no banco`));
-            } else {
-                // Já temos base suficiente, todo lucro vai para o banco
-                profitBankBase += lucroBase;
-                console.log(chalk.magenta(`[REINVEST] LONG reinvest=false: base já restaurada, lucro ${lucroBase.toFixed(8)} no banco`));
-            }
-        }
-    } else if (strategy === 'SHORT') {
-        // ──── SHORT: acumula capital em moeda (ativo vendido) ────
-        if (cfg.operacao.reinvestProfits) {
-            // Reinvestir: converter TODO lucro para moeda usando BUY
-            if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) {
-                profitBankBase += lucroBase;
-                console.warn(chalk.yellow('[REINVEST] SHORT reinvest=true: preço inválido, aguardando para reinvestir.'));
-                return;
-            }
-
-            const moedaExtra = lucroBase / currentPrice;
-
-            // Verificar minNotional
-            if (lucroBase < minAmt) {
-                profitBankBase += lucroBase;
-                console.warn(chalk.yellow(`[REINVEST] SHORT reinvest=true: ${lucroBase.toFixed(8)} ${base} abaixo do minNotional, acumulando.`));
-                return;
-            }
-
-            if (DEMO) {
-                // DEMO: converter base para moeda
-                demoBalance.moeda += moedaExtra;
-                demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
-                console.log(chalk.magenta(`[REINVEST] DEMO SHORT reinvest=true: convertido ${lucroBase.toFixed(8)} ${base} → ${moedaExtra.toFixed(8)} ${moeda}`));
-            } else {
-                // REAL: executar ordem BUY
-                try {
-                    await client.order({
-                        symbol,
-                        side: 'BUY',
-                        type: 'MARKET',
-                        quoteOrderQty: lucroBase.toFixed(8),
-                        newOrderRespType: 'FULL',
-                    });
-                    console.log(chalk.magenta(`[REINVEST] REAL SHORT reinvest=true: ordem BUY de ${lucroBase.toFixed(8)} ${base} → ${moeda} executada.`));
-                    await balanceUpdt();
-                } catch (err) {
-                    const msg = (err && err.message) ? String(err.message).toLowerCase() : '';
-                    if (msg.includes('min_notional') || msg.includes('notional')) {
-                        profitBankBase += lucroBase;
-                        console.warn(chalk.yellow('[REINVEST] SHORT reinvest=true: MIN_NOTIONAL, acumulando.'));
-                    } else {
-                        // Fallback contábil
-                        balanceQty += moedaExtra;
-                        balanceAmt = Math.max(0, balanceAmt - lucroBase);
-                        console.error(chalk.red('[REINVEST] REAL SHORT reinvest=true: falha na ordem', err.message));
-                        console.log(chalk.magenta(`[REINVEST] Fallback: ${lucroBase.toFixed(8)} ${base} → ${moedaExtra.toFixed(8)} ${moeda}`));
-                    }
-                }
-            }
-        } else {
-            // Não reinvestir: manter cycleStartBalanceMoeda, resto em profitBankBase
-            const targetMoeda = cycleStartBalanceMoeda || 0;
-            const currentMoeda = DEMO ? demoBalance.moeda : balanceQty;
-
-            if (currentMoeda < targetMoeda) {
-                // Usar parte do lucro para comprar moeda e restaurar até targetMoeda
-                if (!currentPrice || isNaN(currentPrice) || currentPrice <= 0) {
-                    profitBankBase += lucroBase;
-                    console.warn(chalk.yellow('[REINVEST] SHORT reinvest=false: preço inválido, aguardando.'));
-                    return;
-                }
-
-                const deficit = targetMoeda - currentMoeda;
-                const necessario = deficit * currentPrice;
-                const usado = Math.min(necessario, lucroBase);
-                const moedaComprada = usado / currentPrice;
-
-                if (DEMO) {
-                    demoBalance.moeda += moedaComprada;
-                    demoBalance.base = Math.max(0, demoBalance.base - usado);
-                } else {
-                    balanceQty += moedaComprada;
-                    balanceAmt = Math.max(0, balanceAmt - usado);
-                }
-
-                profitBankBase += Math.max(0, lucroBase - usado);
-                console.log(chalk.magenta(`[REINVEST] SHORT reinvest=false: restaurado ${moedaComprada.toFixed(8)} ${moeda}, resto ${(lucroBase - usado).toFixed(8)} no banco`));
-            } else {
-                // Já temos moeda suficiente, todo lucro vai para o banco
-                profitBankBase += lucroBase;
-                console.log(chalk.magenta(`[REINVEST] SHORT reinvest=false: moeda já restaurada, lucro ${lucroBase.toFixed(8)} no banco`));
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────
-// Cliente Binance
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENTE BINANCE
+// ─────────────────────────────────────────────────────────────────────────────
 
 const client = Binance({
     apiKey: process.env.BINANCE_API_KEY,
     apiSecret: process.env.BINANCE_API_SECRET,
 });
 
-// Cache de taxas por símbolo (consultado via API em modo REAL)
-let tradeFeeCache = { ts: 0, data: null };
-let tradeFeePerSymbol = {}; // mapping symbol -> taker fee (decimal)
+// ─────────────────────────────────────────────────────────────────────────────
+// STATS
+// ─────────────────────────────────────────────────────────────────────────────
 
-async function fetchTradeFees(symbol) {
-    // cache por 10 minutos local também
+function normalizeStats(raw) {
+    const base_ = defaultStats();
+    if (!raw || typeof raw !== 'object') return base_;
+    return {
+        ...base_, ...raw,
+        sessao: { ...base_.sessao, ...(raw.sessao || {}) },
+        trades: { ...base_.trades, ...(raw.trades || {}) },
+        financeiro: { ...base_.financeiro, ...(raw.financeiro || {}) },
+        historico: Array.isArray(raw.historico) ? raw.historico : [],
+    };
+}
+
+let stats = normalizeStats(readJson(STATS_PATH));
+
+function saveStats() {
+    writeJson(STATS_PATH, stats);
+}
+
+function archiveStats() {
+    const dir = path.join(DATA_DIR, BOT_ID ? `stats_archives_${BOT_ID}` : 'stats_archives');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    writeJson(path.join(dir, `stats_${ts}.json`), stats);
+    console.log(chalk.blue(`📦 Stats arquivados`));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTADO PERSISTIDO
+// ─────────────────────────────────────────────────────────────────────────────
+
+function loadPersistedState() {
+    // normalizeState garante compatibilidade com states antigos (sem campos v2)
+    const s = normalizeState(readJson(STATE_PATH));
+
+    if (s.tradeSide) tradeSide = s.tradeSide;
+    if (s.buyPrice != null) buyPrice = s.buyPrice;
+    if (s.sellPrice != null) sellPrice = s.sellPrice;
+    if (s.buyAmount != null) buyAmount = s.buyAmount;
+    if (s.sellAmount != null) sellAmount = s.sellAmount;
+
+    // campos v2 (ausentes em states antigos chegam como null/0 após normalizeState)
+    if (s.cycleStartBalanceBase != null) cycleStartBalanceBase = s.cycleStartBalanceBase;
+    if (s.cycleStartBalanceMoeda != null) cycleStartBalanceMoeda = s.cycleStartBalanceMoeda;
+    if (s.profitBankBase > 0) profitBankBase = s.profitBankBase;
+
+    if (dcaEnabled && s.dca?.isActive) {
+        dcaStrategy = restoreDcaState(s.dca);
+        if (dcaStrategy?.isActive) {
+            console.log(chalk.green(`✅ DCA restaurado (${dcaStrategy.ordersCount}/${1 + dcaStrategy.maxExtraOrders} ordens)`));
+        }
+    } else if (s.dca && !s.dca.isActive) {
+        // state.json com dca.isActive=false é normal — não restaura DCA, sem log de erro
+        console.log(chalk.gray(`[STATE] DCA inativo no state salvo — ok.`));
+    }
+}
+
+function restoreDcaState(saved) {
+    if (!saved?.isActive) return null;
+    const dca = new DCAStrategy({
+        maxOrders: dcaMaxOrders, targetPercent: dcaTargetPercent,
+        symbol, base, moeda, strategy,
+        profitConfig: cfg.dca?.profitConfig || {},
+    });
+    const keys = [
+        'positions', 'currentTargetPrice', 'initialPositionPrice', 'totalQuantity',
+        'totalCost', 'totalValue', 'averageEntryPrice', 'ordersCount', 'isActive',
+        'lastActionPrice', 'expectedProfit', 'expectedProfitPercent',
+        'profitPerOrder', 'weightedTargetPrice',
+    ];
+    keys.forEach(k => { if (saved[k] !== undefined) dca[k] = saved[k]; });
+    return dca;
+}
+
+function getCurrentState() {
+    // Sempre grava o objeto dca completo para manter o schema estável no state.json.
+    // Campos booleanos/numéricos têm defaults seguros quando DCA está inativo.
+    const def = defaultState();
+    let dcaSnapshot = { ...def.dca };
+
+    if (dcaEnabled && dcaStrategy) {
+        const info = dcaStrategy.getPositionInfo();
+        dcaSnapshot = {
+            isActive: info.isActive,
+            ordersCount: info.ordersCount,
+            maxOrders: info.maxOrders,
+            averageEntryPrice: info.averageEntryPrice || 0,
+            totalQuantity: info.totalQuantity || 0,
+            totalCost: info.totalCost || 0,
+            currentTargetPrice: info.currentTargetPrice || 0,
+            expectedProfit: info.expectedProfit || 0,
+            expectedProfitPercent: info.expectedProfitPercent || 0,
+            positions: info.positions || [],
+            lastActionPrice: dcaStrategy.lastActionPrice ?? null,
+        };
+    }
+
+    return {
+        tradeSide,
+        buyPrice,
+        sellPrice,
+        buyAmount,
+        sellAmount,
+        cycleStartBalanceBase,
+        cycleStartBalanceMoeda,
+        profitBankBase,
+        dca: dcaSnapshot,
+    };
+}
+
+function saveState() {
+    writeJson(STATE_PATH, getCurrentState());
+}
+
+function validateState() {
+    const eps = 1e-8;
+    const hasQty = balanceQty != null && balanceQty > eps;
+    const hasBase = balanceAmt != null && balanceAmt > eps;
+    let bad = false;
+
+    if (strategy === 'LONG' && tradeSide === 'SELL' && !hasQty) bad = true;
+    if (strategy === 'SHORT' && tradeSide === 'BUY' && !hasBase) bad = true;
+    if (dcaStrategy?.isActive && (!dcaStrategy.isActive || dcaStrategy.totalQuantity <= 0)) bad = true;
+
+    if (bad) {
+        console.warn(chalk.yellow('⚠️  Estado persistido inconsistente — resetando.'));
+        tradeSide = cfg.modo.tradeSide;
+        buyPrice = sellPrice = buyAmount = sellAmount = null;
+        cycleStartBalanceBase = cycleStartBalanceMoeda = null;
+        profitBankBase = 0;
+        dcaStrategy?.cancel('Estado inconsistente');
+        dcaStrategy = null;
+        writeJson(STATE_PATH, defaultState());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HOT-RELOAD DE CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+
+function applyConfig(newCfg) {
+    cfg = newCfg;
+    pctBaseLong = Math.min(Math.max(parseFloat(cfg.seguranca.pctBaseLong ?? pctBaseLong), 0), 1);
+    pctMoedaShort = Math.min(Math.max(parseFloat(cfg.seguranca.pctMoedaShort ?? pctMoedaShort), 0), 1);
+    rsiBuy = cfg.rsi.rsiBuy ?? rsiBuy;
+    rsiSell = cfg.rsi.rsiSell ?? rsiSell;
+    alvoBuy = cfg.alvos.alvoBuy ?? alvoBuy;
+    alvoSell = cfg.alvos.alvoSell ?? alvoSell;
+    secureTrend = cfg.seguranca.secureTrend ?? secureTrend;
+    secureLow = cfg.seguranca.secureLow ?? secureLow;
+    secureHigh = cfg.seguranca.secureHigh ?? secureHigh;
+    stopLossPercentLong = cfg.seguranca.stopLossPercentLong ?? stopLossPercentLong;
+    stopLossPercentShort = cfg.seguranca.stopLossPercentShort ?? stopLossPercentShort;
+    cfg.operacao = cfg.operacao || {};
+    cfg.operacao.reinvestProfits = cfg.operacao.reinvestProfits ?? false;
+    cfg.operacao.reinvestMode = cfg.operacao.reinvestMode ?? 'equal';
+    console.log(chalk.green('[CONFIG] Recarregado.'));
+}
+
+fs.watchFile(CONFIG_PATH, { interval: 1500 }, (curr, prev) => {
+    if (curr.mtimeMs === prev.mtimeMs) return;
+    try { applyConfig(loadConfig()); } catch (e) { console.error('[CONFIG] Falha ao recarregar:', e.message); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CACHE SERVER — FETCH HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function cacheGet(endpoint, params = {}) {
+    const url = new URL(`${CACHE_URL}/${endpoint}`);
+    Object.entries(params).forEach(([k, v]) => { if (v != null) url.searchParams.append(k, v); });
+    const res = await fetch(url.href);
+    if (res.status === 204) return null;
+    if (!res.ok) throw new Error(`Cache ${res.status} ${res.statusText}`);
+    return res.json();
+}
+
+async function getPrice() {
+    let attempts = 0;
+    while (attempts++ < 3) {
+        try {
+            // acorda o rastreamento do símbolo
+            await fetch(`${CACHE_URL}/cache?symbol=${symbol}&interval=${candleInterval}`).catch(() => { });
+            const data = await cacheGet('price', { symbol });
+            const p = parseFloat(data?.price);
+            if (p > 0) { currentPrice = p; return; }
+        } catch (_) { }
+        await sleep(100);
+    }
+    throw new Error('Preço indisponível após 3 tentativas');
+}
+
+async function update24hStats() {
+    try {
+        const d = await cacheGet('stats24h', { symbol });
+        if (d) { dailyLow = parseFloat(d.lowPrice); dailyHigh = parseFloat(d.highPrice); }
+    } catch (e) { console.warn('[24h]', e.message); }
+}
+
+async function getLastCandleClose() {
+    try {
+        const arr = await cacheGet(`cache`, { symbol, interval: candleInterval });
+        if (!Array.isArray(arr) || arr.length < 2) return null;
+        return parseFloat(arr[arr.length - 2]);
+    } catch (e) { console.warn('[candle]', e.message); return null; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SALDO
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function balanceUpdt() {
+    try {
+        if (DEMO) {
+            balanceAmt = demoBalance.base;
+            balanceQty = demoBalance.moeda;
+        } else {
+            const info = await withRetry(() => client.accountInfo(), 3, 1000);
+            balanceAmt = parseFloat(info.balances.find(b => b.asset === base)?.free ?? 0);
+            balanceQty = parseFloat(info.balances.find(b => b.asset === moeda)?.free ?? 0);
+        }
+        const tag = DEMO ? chalk.yellow('[DEMO] ') : '';
+        console.log(`${tag}Saldo ${base}: ${balanceAmt?.toFixed(4)} | ${moeda}: ${balanceQty}`);
+        console.log(chalk.gray('───────────────────────────────────'));
+    } catch (e) { console.error('Erro ao atualizar saldo:', e.message); }
+}
+
+function getAvailableBase() { return DEMO ? demoBalance.base : balanceAmt; }
+function getAvailableMoeda() { return DEMO ? demoBalance.moeda : balanceQty; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FILTROS DE ORDEM (LOT_SIZE / MIN_NOTIONAL)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function updateMinOrderQty() {
+    try {
+        let info = null;
+        try { info = await cacheGet('exchangeInfo', { symbol }); } catch (e) { /* fallback */ }
+
+        if (!info?.symbol) {
+            const cached = readJson(STEP_CACHE, {})[symbol];
+            if (cached) {
+                ({ stepSize, minQty, minAmt } = cached);
+                console.log(chalk.yellow(`[FILTERS] Usando cache local: step=${stepSize} minQty=${minQty} minAmt=${minAmt}`));
+                await balanceUpdt();
+                return;
+            }
+            throw new Error('ExchangeInfo indisponível e sem cache local.');
+        }
+
+        const lotSize = info.filters.find(f => f.filterType === 'LOT_SIZE');
+        const notional = info.filters.find(f => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+
+        if (lotSize) {
+            minQty = parseFloat(lotSize.minQty);
+            stepSize = parseFloat(lotSize.stepSize);
+        }
+        minAmt = notional ? parseFloat(notional.minNotional) : 5;
+
+        const cache = readJson(STEP_CACHE, {});
+        cache[symbol] = { stepSize, minQty, minAmt };
+        writeJson(STEP_CACHE, cache);
+
+        console.log(`Filtros ${symbol}: minAmt=${minAmt} minQty=${minQty} stepSize=${stepSize}`);
+        await balanceUpdt();
+    } catch (e) {
+        console.error('Erro ao obter filtros:', e.message);
+    }
+}
+
+async function adjustQty(requestQty, side) {
+    if (!stepSize || !currentPrice || !minAmt || !minQty) await updateMinOrderQty();
+    if (!stepSize || !currentPrice || !minAmt || !minQty) return parseFloat(requestQty.toFixed(8));
+
+    const prec = Math.max(0, Math.ceil(-Math.log10(stepSize)));
+    const minQtyAligned = Math.ceil(minQty / stepSize) * stepSize;
+
+    let q = Math.floor(requestQty / stepSize) * stepSize;
+    q = parseFloat(q.toFixed(prec));
+    if (q < minQtyAligned) q = minQtyAligned;
+
+    // garante minNotional
+    let guard = 0;
+    while (q * currentPrice < minAmt && guard++ < 100000) q = parseFloat((q + stepSize).toFixed(prec));
+    if (q * currentPrice < minAmt) { console.warn('[ADJUST] Não atingiu minNotional.'); return null; }
+
+    // limites de saldo
+    if (side === 'BUY') {
+        const avail = getAvailableBase();
+        if (q * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN > avail) {
+            let maxQ = Math.floor(avail / (1 + TAX_MARKET) / currentPrice / stepSize) * stepSize;
+            maxQ = parseFloat(maxQ.toFixed(prec));
+            if (maxQ < minQtyAligned || maxQ * currentPrice < minAmt) return null;
+            return maxQ;
+        }
+    }
+    if (side === 'SELL') {
+        const avail = getAvailableMoeda();
+        if (q > avail) {
+            let maxQ = Math.floor(avail / stepSize) * stepSize;
+            maxQ = parseFloat(maxQ.toFixed(prec));
+            if (maxQ < minQtyAligned || maxQ * currentPrice < minAmt) return null;
+            return maxQ;
+        }
+    }
+    return q;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAXAS
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function fetchTradeFees() {
+    if (DEMO) return;
     const now = Date.now();
-    if (tradeFeeCache.data && (now - tradeFeeCache.ts) < 10 * 60 * 1000) return tradeFeeCache.data;
+    if (tradeFeeCache.data && now - tradeFeeCache.ts < 10 * 60 * 1000) return;
     try {
-        const fees = await fetchCache('tradeFee', { symbol });
-        tradeFeeCache = { ts: now, data: fees };
-        // fees geralmente retorna array; encontrar entry para symbol
-        if (fees && Array.isArray(fees)) {
-            for (const f of fees) {
-                if (f.symbol && f.symbol === symbol) {
-                    tradeFeePerSymbol[symbol] = parseFloat(f.taker ?? f.fee ?? TAX_MARKET);
-                    break;
-                }
+        const fees = await cacheGet('tradeFee', { symbol });
+        if (fees) {
+            tradeFeeCache = { ts: now, data: fees };
+            if (Array.isArray(fees)) {
+                const f = fees.find(f => f.symbol === symbol);
+                if (f) tradeFeePerSymbol[symbol] = parseFloat(f.taker ?? f.fee ?? TAX_MARKET);
             }
         }
-        return fees;
-    } catch (err) {
-        console.warn('Não foi possível obter trade fees via cache server, fallback local. Erro:', err.message || err);
-        try {
-            const directFees = await withRetry(() => client.tradeFee({ symbol }), [], 2, 500);
-            tradeFeeCache = { ts: now, data: directFees };
-            return directFees;
-        } catch (e) {
-            return null;
-        }
-    }
+    } catch (e) { console.warn('[FEES]', e.message); }
 }
 
-/**
- * Calcula a taxa paga numa ordem (em termos do ativo `base`) usando os fills retornados pela API.
- * Se fills não estiverem disponíveis (modo DEMO ou resposta parcial), cai no cálculo estimado por config.
- */
-async function calcOrderFeeInBase(order) {
-    try {
-        if (!order) return 0;
-        // Preferir fills[] comissão detalhada
-        if (order.fills && order.fills.length > 0) {
-            let totalFeeInBase = 0;
-            for (const f of order.fills) {
-                const comm = parseFloat(f.commission || 0);
-                const commAsset = f.commissionAsset || base; // pode ser BNB ou outro
-                if (comm === 0) continue;
-
-                if (commAsset === base) {
-                    totalFeeInBase += comm;
-                    console.log(`[FEES] Fill commission: ${comm} ${commAsset} (already in ${base})`);
-                } else {
-                    // converte commAsset para base via preço atual, possivelmente via intermediários
-                    try {
-                        const conv = await convertAssetToBase(commAsset, base);
-                        if (conv) {
-                            const added = comm * conv;
-                            totalFeeInBase += added;
-                            console.log(`[FEES] Fill commission: ${comm} ${commAsset} -> ${added.toFixed(8)} ${base} (rate ${conv})`);
-                        } else {
-                            console.warn(`[FEES] Não foi possível converter comissão de ${commAsset} para ${base}; ignorando ${comm} ${commAsset}`);
-                        }
-                    } catch (e) {
-                        console.warn('Erro ao converter commissionAsset:', e.message || e);
-                    }
-                }
-            }
-            return totalFeeInBase;
+async function calcFeeInBase(order) {
+    if (!order) return 0;
+    if (order.fills?.length) {
+        let total = 0;
+        for (const f of order.fills) {
+            const comm = parseFloat(f.commission || 0);
+            if (!comm) continue;
+            if (f.commissionAsset === base) { total += comm; continue; }
+            const rate = await convertToBase(f.commissionAsset);
+            if (rate) total += comm * rate;
         }
-
-        // Se não houver fills, estimativa usando TAX_MARKET aplicada sobre execQuote
-        const execQuote = parseFloat(order.cummulativeQuoteQty || 0);
-        const symFee = tradeFeePerSymbol[symbol] ?? TAX_MARKET;
-        console.log(`[FEES] Usando estimativa de taxa para ${symbol}: ${symFee} (execQuote ${execQuote})`);
-        return execQuote * symFee;
-    } catch (err) {
-        console.error('Erro em calcOrderFeeInBase:', err.message || err);
-        return 0;
+        return total;
     }
+    const execQuote = parseFloat(order.cummulativeQuoteQty || 0);
+    return execQuote * (tradeFeePerSymbol[symbol] ?? TAX_MARKET);
 }
 
-// Converte um ativo (asset) para o valor em `base` retornando multiplicador (1 asset = x base)
-async function convertAssetToBase(asset, baseAsset) {
-    if (asset === baseAsset) return 1;
-
-    const tryPairPrice = async (pair) => {
-        // primeiro tenta obter via cache server (já mantém tickers em memória)
+async function convertToBase(asset) {
+    if (asset === base) return 1;
+    const tryPrice = async (pair) => {
         try {
-            const resp = await fetch(`${CACHE_URL}/price?symbol=${pair}`);
-            if (resp.ok) {
-                const json = await resp.json();
-                const p = parseFloat(json.price);
-                if (!isNaN(p) && p > 0) return p;
-            }
-        } catch (e) {
-            // continuar para fallback
-        }
-
-        // fallback: consulta direta ao cliente Binance local
-        try {
-            const res = await withRetry(() => client.prices({ symbol: pair }), [], 2, 300);
-            if (res && res[pair]) return parseFloat(res[pair]);
-        } catch (e) {
-            return null;
-        }
+            const r = await fetch(`${CACHE_URL}/price?symbol=${pair}`);
+            if (r.ok) { const j = await r.json(); const p = parseFloat(j.price); if (p > 0) return p; }
+        } catch (_) { }
         return null;
     };
-
-    // 1) direct pair asset+base
-    let price = await tryPairPrice(`${asset}${baseAsset}`);
-    if (price && !Number.isNaN(price) && price > 0) return price;
-
-    // 2) inverse pair base+asset
-    price = await tryPairPrice(`${baseAsset}${asset}`);
-    if (price && !Number.isNaN(price) && price > 0) return 1 / price;
-
-    // 3) try single-hop intermediates in a deterministic order
-    const intermediates = ['BTC', 'USDT', 'ETH', 'BNB'];
-    for (const mid of intermediates) {
-        if (mid === asset || mid === baseAsset) continue;
-
-        // asset -> mid
-        let aToMid = await tryPairPrice(`${asset}${mid}`);
-        if (!aToMid) {
-            const midToA = await tryPairPrice(`${mid}${asset}`);
-            if (midToA && midToA > 0) aToMid = 1 / midToA;
-        }
-        if (!aToMid || Number.isNaN(aToMid) || aToMid <= 0) continue;
-
-        // mid -> base
-        let midToBase = await tryPairPrice(`${mid}${baseAsset}`);
-        if (!midToBase) {
-            const baseToMid = await tryPairPrice(`${baseAsset}${mid}`);
-            if (baseToMid && baseToMid > 0) midToBase = 1 / baseToMid;
-        }
-        if (!midToBase || Number.isNaN(midToBase) || midToBase <= 0) continue;
-
-        // composed rate: (asset -> mid) * (mid -> base)
-        return aToMid * midToBase;
+    let p = await tryPrice(`${asset}${base}`);
+    if (p) return p;
+    p = await tryPrice(`${base}${asset}`);
+    if (p) return 1 / p;
+    for (const mid of ['BTC', 'USDT', 'ETH', 'BNB']) {
+        if (mid === asset || mid === base) continue;
+        let aToMid = await tryPrice(`${asset}${mid}`) ?? (1 / await tryPrice(`${mid}${asset}`) || null);
+        let midToBase = await tryPrice(`${mid}${base}`) ?? (1 / await tryPrice(`${base}${mid}`) || null);
+        if (aToMid && midToBase) return aToMid * midToBase;
     }
-
-    // fallback: none found
     return null;
 }
 
-// ─────────────────────────────────────────────
-// Variáveis Dinâmicas
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// REINVESTIMENTO — LÓGICA CENTRAL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  reinvestMode:
+//    "base"  — mantém lucro em base (USDT). Saldo base cresce, posições iguais.
+//    "moeda" — converte lucro para moeda (BTC/ETH). Usa reinvestProfits=true.
+//    "equal" — normaliza tamanho da próxima ordem para igualar à média das ordens do ciclo anterior.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
-let previousCandleClose = null;
-let previousCandleCloseInitialized = false;
-let currentPrice = null;
-let dailyLow = null;
-let dailyHigh = null;
-let buyPrice = null;
-let sellPrice = null;
-let trend = null;
-let rsi = null;
+async function accumulateProfit(lucroBase) {
+    if (lucroBase <= 0) return;
 
-// Evita concorrência de ordens: marca quando uma ordem está em processo
-let isOrderPending = false;
+    const reinvest = cfg.operacao.reinvestProfits;
+    const mode = cfg.operacao.reinvestMode ?? 'equal';
 
-let minQty = null;
-let minAmt = null;
-let stepSize = null;
+    console.log(chalk.magenta(
+        `[REINVEST] strategy=${strategy} mode=${mode} reinvest=${reinvest} lucro=${lucroBase.toFixed(8)} ${base}`
+    ));
 
-let balanceAmt = null;
-let balanceQty = null;
-let buyAmount = null;
-let sellAmount = null;
+    // ── LONG ────────────────────────────────────────────────────────────────
+    if (strategy === 'LONG') {
+        if (mode === 'base' || !reinvest) {
+            // "base": lucro fica em USDT. cycleStartBalanceBase define o nível de restauração.
+            // Se abaixo do nível inicial do ciclo, restaura até lá; excedente vai para banco.
+            const target = cycleStartBalanceBase || 0;
+            const current = getAvailableBase();
+            if (current < target) {
+                const deficit = target - current;
+                const uso = Math.min(deficit, lucroBase);
+                if (DEMO) demoBalance.base += uso; else balanceAmt = (balanceAmt || 0) + uso;
+                profitBankBase += Math.max(0, lucroBase - uso);
+                console.log(chalk.magenta(`[REINVEST] LONG/base: restaurou ${uso.toFixed(8)} ${base} | banco: ${profitBankBase.toFixed(8)}`));
+            } else {
+                profitBankBase += lucroBase;
+                console.log(chalk.magenta(`[REINVEST] LONG/base: base restaurada, +${lucroBase.toFixed(8)} no banco`));
+            }
+        } else if (mode === 'moeda') {
+            // "moeda" + reinvest=true: converte lucro em base para mais moeda (compra imediata)
+            if (!currentPrice || currentPrice <= 0) { profitBankBase += lucroBase; return; }
+            if (lucroBase < (minAmt || 5)) { profitBankBase += lucroBase; return; }
+            if (DEMO) {
+                const qty = lucroBase / currentPrice;
+                demoBalance.moeda += qty;
+                demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
+                console.log(chalk.magenta(`[REINVEST] DEMO LONG/moeda: +${qty.toFixed(8)} ${moeda}`));
+            } else {
+                try {
+                    await client.order({
+                        symbol, side: 'BUY', type: 'MARKET',
+                        quoteOrderQty: lucroBase.toFixed(8), newOrderRespType: 'FULL'
+                    });
+                    await balanceUpdt();
+                    console.log(chalk.magenta(`[REINVEST] REAL LONG/moeda: comprou ${moeda} com ${lucroBase.toFixed(8)} ${base}`));
+                } catch (e) {
+                    if (/min_notional|notional/i.test(e.message)) profitBankBase += lucroBase;
+                    else { balanceQty = (balanceQty || 0) + lucroBase / currentPrice; }
+                    console.warn('[REINVEST] LONG/moeda falhou:', e.message);
+                }
+            }
+        } else if (mode === 'equal') {
+            // "equal": normaliza tamanho para igualar quantidade média das ordens do ciclo.
+            // O lucro fica em base para que a PRÓXIMA ordem baseie-se no mesmo capital.
+            profitBankBase += lucroBase;
+            console.log(chalk.magenta(`[REINVEST] LONG/equal: +${lucroBase.toFixed(8)} no banco (ciclo normalizado)`));
+        }
 
-// Restaura valores de posição caso o bot tenha sido reiniciado
-if (persistedState) {
-    if (persistedState.buyPrice != null) buyPrice = persistedState.buyPrice;
-    if (persistedState.sellPrice != null) sellPrice = persistedState.sellPrice;
-    if (persistedState.buyAmount != null) buyAmount = persistedState.buyAmount;
-    if (persistedState.sellAmount != null) sellAmount = persistedState.sellAmount;
-    if (dcaEnabled && persistedState.dca && persistedState.dca.isActive) {
-        dcaStrategy = restoreDcaState(persistedState.dca);
-        if (dcaStrategy && dcaStrategy.isActive) {
-            console.log(chalk.green(`✅ Estado DCA restaurado (ordens: ${dcaStrategy.ordersCount}/${1 + dcaStrategy.maxExtraOrders})`));
+        // ── SHORT ───────────────────────────────────────────────────────────────
+    } else if (strategy === 'SHORT') {
+        if (mode === 'base' || !reinvest) {
+            // "base": acumula base, restaura nível inicial de moeda se necessário
+            const target = cycleStartBalanceMoeda || 0;
+            const current = getAvailableMoeda();
+            if (current < target && currentPrice > 0) {
+                const deficit = target - current;
+                const necessary = deficit * currentPrice;
+                const uso = Math.min(necessary, lucroBase);
+                const qty = uso / currentPrice;
+                if (DEMO) { demoBalance.moeda += qty; demoBalance.base = Math.max(0, demoBalance.base - uso); }
+                else { balanceQty = (balanceQty || 0) + qty; balanceAmt = Math.max(0, (balanceAmt || 0) - uso); }
+                profitBankBase += Math.max(0, lucroBase - uso);
+                console.log(chalk.magenta(`[REINVEST] SHORT/base: restaurou ${qty.toFixed(8)} ${moeda}`));
+            } else {
+                profitBankBase += lucroBase;
+                console.log(chalk.magenta(`[REINVEST] SHORT/base: moeda restaurada, +${lucroBase.toFixed(8)} no banco`));
+            }
+        } else if (mode === 'moeda' && reinvest) {
+            // "moeda" + reinvest=true: converte lucro em base para mais moeda
+            if (!currentPrice || currentPrice <= 0) { profitBankBase += lucroBase; return; }
+            if (lucroBase < (minAmt || 5)) { profitBankBase += lucroBase; return; }
+            if (DEMO) {
+                const qty = lucroBase / currentPrice;
+                demoBalance.moeda += qty;
+                demoBalance.base = Math.max(0, demoBalance.base - lucroBase);
+                console.log(chalk.magenta(`[REINVEST] DEMO SHORT/moeda: +${qty.toFixed(8)} ${moeda}`));
+            } else {
+                try {
+                    await client.order({
+                        symbol, side: 'BUY', type: 'MARKET',
+                        quoteOrderQty: lucroBase.toFixed(8), newOrderRespType: 'FULL'
+                    });
+                    await balanceUpdt();
+                    console.log(chalk.magenta(`[REINVEST] REAL SHORT/moeda: comprou ${moeda} com ${lucroBase.toFixed(8)} ${base}`));
+                } catch (e) {
+                    if (/min_notional|notional/i.test(e.message)) profitBankBase += lucroBase;
+                    else { balanceQty = (balanceQty || 0) + lucroBase / currentPrice; }
+                    console.warn('[REINVEST] SHORT/moeda falhou:', e.message);
+                }
+            }
+        } else if (mode === 'equal') {
+            // "equal": normaliza quantidade de moeda para o próximo ciclo
+            profitBankBase += lucroBase;
+            console.log(chalk.magenta(`[REINVEST] SHORT/equal: +${lucroBase.toFixed(8)} no banco (ciclo normalizado)`));
         }
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// REGISTRO DE TRADE
+// ─────────────────────────────────────────────────────────────────────────────
 
-
-// ─────────────────────────────────────────────
-// Estado Demo
-// ─────────────────────────────────────────────
-
-let demoBalance = {
-    // tenta usar a moeda base declarada no cfg; mantém compatibilidade com EUA antiga (USDT)
-    base: cfg.demo_saldo_inicial[cfg.modo.base] ?? cfg.demo_saldo_inicial.base ?? 0,
-    moeda: cfg.demo_saldo_inicial.moeda,
-};
-
-// ─────────────────────────────────────────────
-// Stats de Performance
-// ─────────────────────────────────────────────
-
-let stats = loadStats();
-
-/**
- * Registra um trade fechado nas estatísticas.
- * As taxas são calculadas sobre o valor total das DUAS pernas do trade (entrada + saída).
- *
- * @param {'BUY'|'SELL'} side       - Lado que FECHOU o ciclo
- * @param {number}        entryPrice - Preço de entrada do ciclo
- * @param {number}        exitPrice  - Preço de saída do ciclo
- * @param {number}        qty        - Quantidade negociada
- * @param {boolean}       isStopLoss - Se foi acionado por stop loss
- */
 async function registrarTrade(side, entryPrice, exitPrice, qty, isStopLoss = false, feePaidBase = null) {
-    // feePaidBase (opcional): valor real de taxas já pagas em `base` (ex.: USDT).
-    // se não fornecido ou inválido, fazemos estimativa com TAX_MARKET
     let taxaTotal = 0;
-    let usedEstimate = false;
-    if (feePaidBase !== null && !Number.isNaN(Number(feePaidBase))) {
+    let feeEstimated = true;
+    if (feePaidBase != null && !isNaN(Number(feePaidBase))) {
         taxaTotal = Number(feePaidBase);
+        feeEstimated = false;
     } else {
-        usedEstimate = true;
-        const taxaEntrada = entryPrice * qty * TAX_MARKET;
-        const taxaSaida = exitPrice * qty * TAX_MARKET;
-        taxaTotal = taxaEntrada + taxaSaida;
+        taxaTotal = (entryPrice + exitPrice) * qty * TAX_MARKET;
     }
 
-    let lucroLiquido;
-    if (strategy === 'SHORT') {
-        // SHORT: abriu vendendo em entryPrice, fechou comprando em exitPrice
-        lucroLiquido = (entryPrice - exitPrice) * qty - taxaTotal;
-    } else {
-        // LONG: abriu comprando em entryPrice, fechou vendendo em exitPrice
-        lucroLiquido = (exitPrice - entryPrice) * qty - taxaTotal;
-    }
+    const lucroLiquido = strategy === 'SHORT'
+        ? (entryPrice - exitPrice) * qty - taxaTotal
+        : (exitPrice - entryPrice) * qty - taxaTotal;
 
     const lucroPct = ((lucroLiquido / (entryPrice * qty)) * 100).toFixed(3);
 
-    // Atualiza estatísticas (metadados de trades e lucros, saldo será recalculado após reinvestimento)
+    // estatísticas
     stats.trades.total++;
     stats.financeiro.taxasTotais = +(stats.financeiro.taxasTotais + taxaTotal).toFixed(8);
     stats.financeiro.lucroLiquidoTotal = +(stats.financeiro.lucroLiquidoTotal + lucroLiquido).toFixed(8);
     if (isStopLoss) stats.trades.stopLossAcionados++;
-
     if (lucroLiquido >= 0) {
         stats.trades.lucrativos++;
         if (lucroLiquido > stats.financeiro.maiorLucroTrade)
@@ -908,1331 +876,630 @@ async function registrarTrade(side, entryPrice, exitPrice, qty, isStopLoss = fal
             stats.financeiro.maiorPrejuizoTrade = +lucroLiquido.toFixed(8);
     }
 
-    // Histórico individual
     stats.historico.push({
-        timestamp: new Date().toISOString(),
-        strategy,
-        side,
-        entryPrice,
-        exitPrice,
-        qty: +qty.toFixed(8),
-        taxaTotal: +taxaTotal.toFixed(8),
-        feePaidBase: feePaidBase !== null ? +feePaidBase.toFixed(8) : null,
-        feeEstimated: usedEstimate,
-        lucroLiquido: +lucroLiquido.toFixed(8),
-        lucroPct: `${lucroPct}%`,
-        stopLoss: isStopLoss,
-        modo: DEMO ? 'DEMO' : 'REAL',
+        timestamp: new Date().toISOString(), strategy, side,
+        entryPrice, exitPrice, qty: +qty.toFixed(8),
+        taxaTotal: +taxaTotal.toFixed(8), feeEstimated,
+        lucroLiquido: +lucroLiquido.toFixed(8), lucroPct: `${lucroPct}%`,
+        stopLoss: isStopLoss, modo: DEMO ? 'DEMO' : 'REAL',
+        reinvestMode: cfg.operacao.reinvestMode,
     });
 
-    // se houver lucro e reinvestimento habilitado, acumula para o banco
+    // reinvestimento
     await accumulateProfit(lucroLiquido);
 
-    // Atualiza o saldo atual depois do reinvestimento, para refletir DEMO/REAL corretamente
+    // atualiza saldo atual nos stats
     stats.financeiro.saldoAtualBase = DEMO ? +demoBalance.base.toFixed(8) : balanceAmt;
     stats.financeiro.saldoAtualMoeda = DEMO ? +demoBalance.moeda.toFixed(8) : balanceQty;
 
-    saveStats(stats);
+    saveStats();
 
-    // Reset ciclo: proxima ordem (base ou DCA) vai capturar novo saldo inicial
+    // reset de ciclo — próximo ciclo capturará novos saldos iniciais
     cycleStartBalanceBase = null;
     cycleStartBalanceMoeda = null;
 }
 
-// exibe desempenho acumulado em qualquer ponto
-function logStats() {
-    const fin = stats.financeiro;
-    const tr = stats.trades;
+// ─────────────────────────────────────────────────────────────────────────────
+// ORDENS
+// ─────────────────────────────────────────────────────────────────────────────
 
-    const lucroColor = fin.lucroLiquidoTotal >= 0 ? chalk.green.bold : chalk.red.bold;
-    // se a estratégia for SHORT, convertemos o lucro para a moeda (aprox.)
-    let lucroStr;
-    if (strategy === 'SHORT' && currentPrice) {
-        const valorMoeda = fin.lucroLiquidoTotal / currentPrice;
-        lucroStr = `${fin.lucroLiquidoTotal >= 0 ? '+' : ''}${valorMoeda.toFixed(4)} ${moeda}`;
-    } else {
-        lucroStr = `${fin.lucroLiquidoTotal >= 0 ? '+' : ''}${fin.lucroLiquidoTotal.toFixed(4)} ${base}`;
-    }
-
-    console.log(chalk.cyan('──────── 📊 DESEMPENHO ACUMULADO ────────'));
-    console.log(`Trades  : ${tr.total} total | ✅ ${tr.lucrativos} lucro | ❌ ${tr.prejuizo} prejuízo | 🛑 ${tr.stopLossAcionados} stop`);
-    console.log(`Lucro   : ${lucroColor(lucroStr)}`);
-    console.log(`Taxas   : ~${chalk.yellow(fin.taxasTotais.toFixed(4))} ${base}`);
-    console.log(`Melhor  : ${chalk.green(`+${fin.maiorLucroTrade.toFixed(4)}`)} | Pior: ${chalk.red(`${fin.maiorPrejuizoTrade.toFixed(4)}`)}`);
-
-    if (fin.saldoInicialBase !== null && fin.saldoAtualBase !== null) {
-        if (strategy === 'SHORT') {
-            // usar os saldos reais em moeda salvos nos stats
-            const initMoeda = fin.saldoInicialMoeda;
-            const currMoeda = fin.saldoAtualMoeda;
-            if (typeof initMoeda === 'number' && typeof currMoeda === 'number') {
-                const variacao = currMoeda - initMoeda;
-                const varColor = variacao >= 0 ? chalk.green : chalk.red;
-                // exibe também variação absoluta ao lado do saldo atual
-                const sinal = variacao >= 0 ? '+' : '';
-                console.log(`Saldo ${moeda}: ${initMoeda.toFixed(4)} → ${varColor(currMoeda.toFixed(4))} (${sinal}${variacao.toFixed(4)})`);
-            } else {
-                // caso algum valor ainda não esteja definido, exibimos o saldo atual
-                const avail = DEMO ? demoBalance.moeda : balanceQty;
-                console.log(chalk.yellow(`Saldo ${moeda}: ${avail.toFixed(8)} (saldo atual)`));
-            }
-        } else {
-            const variacao = (fin.saldoAtualBase - fin.saldoInicialBase);
-            const varColor = variacao >= 0 ? chalk.green : chalk.red;
-            const sinal2 = variacao >= 0 ? '+' : '';
-            console.log(`Saldo ${base}: ${fin.saldoInicialBase.toFixed(2)} → ${varColor(parseFloat(fin.saldoAtualBase).toFixed(2))} (${sinal2}${variacao.toFixed(4)})`);
-        }
-    }
-    console.log(chalk.cyan('─────────────────────────────────────────'));
+function logOrder(order) {
+    if (!order?.orderId) return;
+    const { orderId, side, executedQty, cummulativeQuoteQty, status, transactTime } = order;
+    const avg = parseFloat(cummulativeQuoteQty) / parseFloat(executedQty || 1);
+    const taxa = parseFloat(cummulativeQuoteQty) * TAX_MARKET;
+    const label = side === 'SELL' ? '🔻 [VENDA]' : '🟢 [COMPRA]';
+    console.log(`\n${label} ID: ${orderId} | Preço: ${avg.toFixed(6)} | Qty: ${executedQty} | Taxa ~${taxa.toFixed(6)} ${base} | ${status}`);
 }
 
-// ─────────────────────────────────────────────
-// Utilitários
-// ─────────────────────────────────────────────
-
-// Ajusta quantidade para respeitar LOT_SIZE (stepSize), minQty e minNotional (minAmt).
-// Retorna `null` se não for possível montar uma ordem válida (ex.: minNotional não atingido).
-async function adjustQtyToFilters(requestQty, side) {
-    let triedRefresh = false;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-        // se stepSize/minQty/minAmt indefinidos, tenta recarregar via cache e, se possível, via cache server
-        if (!stepSize || !currentPrice || !minAmt || !minQty) {
-            try {
-                await updateMinOrderQty();
-            } catch (e) {
-                // fallback para cache local
-                const allCached = loadStepCache();
-                const cached = allCached[symbol];
-                if (cached && cached.stepSize) {
-                    stepSize = cached.stepSize;
-                    minQty = cached.minQty;
-                    minAmt = cached.minAmt;
-                    console.log(chalk.yellow('[CACHE] usando filtros locais para', symbol, ':',
-                        `stepSize=${stepSize}`, `minQty=${minQty}`, `minAmt=${minAmt}`));
-                }
-            }
-        }
-
-        if (!stepSize || !currentPrice || !minAmt || !minQty) {
-            // sem dados suficientes, não podemos validar
-            try {
-                return parseFloat(requestQty.toFixed(8));
-            } catch (e) {
-                return null;
-            }
-        }
-
-        const precision = Math.max(0, Math.ceil(-Math.log10(stepSize)));
-
-        // Garante que minQty é compatível com stepSize: se minQty for menor que o múltiplo mínimo,
-        // usamos o próximo múltiplo de stepSize para não violar o LOT_SIZE.
-        const minQtyAligned = Math.ceil(minQty / stepSize) * stepSize;
-
-        // alinha para baixo ao stepSize
-        let q = Math.floor(requestQty / stepSize) * stepSize;
-        q = parseFloat(q.toFixed(precision));
-
-        // se o arredondamento pelo stepSize ficou abaixo do mínimo aceito, usamos o mínimo válido.
-        if (q < minQtyAligned) q = minQtyAligned;
-
-        // aumenta até atingir minNotional
-        let guard = 0;
-        while ((q * currentPrice) < minAmt && guard < 100000) {
-            q = parseFloat((q + stepSize).toFixed(precision));
-            guard++;
-        }
-
-        if ((q * currentPrice) < minAmt) {
-            if (!triedRefresh) {
-                triedRefresh = true;
-                console.log(chalk.yellow('[ADJUST] minNotional não atingido, revalidando filtros (cache)'));
-                continue;
-            }
-            // não conseguimos chegar ao mínimo de notional, retorna null para evitar ordens inválidas
-            console.warn(chalk.yellow('[ADJUST] Não foi possível atingir minNotional', minAmt, 'com stepSize', stepSize, 'e price', currentPrice));
-            return null;
-        }
-
-        // para BUY: garante que o custo total (com taxa) caiba no saldo
-        if (side && side.toUpperCase() === 'BUY') {
-            const avail = DEMO ? demoBalance.base : balanceAmt;
-            const totalCost = q * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN;
-            if (totalCost > avail) {
-                // tenta reduzir para o máximo possível que caiba (mantendo stepSize)
-                let maxQ = Math.floor(((avail / (1 + TAX_MARKET)) / currentPrice) / stepSize) * stepSize;
-                maxQ = parseFloat(maxQ.toFixed(precision));
-
-                // se o máximo possível for menor que o mínimo aceito, tenta usar o mínimo se ainda couber no saldo
-                if (maxQ < minQtyAligned) {
-                    const minCost = minQtyAligned * currentPrice * (1 + TAX_MARKET) * SAFETY_MARGIN;
-                    if (minCost <= avail) {
-                        return minQtyAligned;
-                    }
-                    if (!triedRefresh) {
-                        triedRefresh = true;
-                        console.log(chalk.yellow('[ADJUST] Saldo insuficiente após ajuste, revalidando filtros (cache)'));
-                        continue;
-                    }
-                    return null;
-                }
-
-                if ((maxQ * currentPrice) < minAmt) {
-                    if (!triedRefresh) {
-                        triedRefresh = true;
-                        console.log(chalk.yellow('[ADJUST] maxQ ainda abaixo do minNotional, revalidando filtros (cache)'));
-                        continue;
-                    }
-                    return null;
-                }
-                return maxQ;
-            }
-        }
-
-        // para SELL: garante que quantidade não exceda saldo do ativo
-        if (side && side.toUpperCase() === 'SELL') {
-            const avail = DEMO ? demoBalance.moeda : balanceQty;
-            if (q > avail) {
-                let maxQ = Math.floor(avail / stepSize) * stepSize;
-                maxQ = parseFloat(maxQ.toFixed(precision));
-
-                if (maxQ < minQtyAligned) {
-                    // se o máximo possível for menor que o mínimo aceito, verifica se podemos usar o mínimo real
-                    if (minQtyAligned <= avail) {
-                        if ((minQtyAligned * currentPrice) >= minAmt) {
-                            return minQtyAligned;
-                        }
-                    }
-                    if (!triedRefresh) {
-                        triedRefresh = true;
-                        console.log(chalk.yellow('[ADJUST] Saldo insuficiente após ajuste, revalidando filtros (cache)'));
-                        continue;
-                    }
-                    return null;
-                }
-
-                if ((maxQ * currentPrice) < minAmt) {
-                    if (!triedRefresh) {
-                        triedRefresh = true;
-                        console.log(chalk.yellow('[ADJUST] maxQ ainda abaixo do minNotional, revalidando filtros (cache)'));
-                        continue;
-                    }
-                    return null;
-                }
-                return maxQ;
-            }
-        }
-
-        return q;
-    }
-}
-
-// Helper simples de retry para chamadas à API
-async function withRetry(fn, args = [], retries = 3, delay = 500) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            return await fn(...args);
-        } catch (err) {
-            if (i === retries - 1) throw err;
-            console.warn(`Tentativa ${i + 1} falhou: ${err.message || err}. Retentando em ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-        }
-    }
-}
-
-// ─────────────────────────────────────────────
-// Inicialização: Limites mínimos do símbolo
-// ─────────────────────────────────────────────
-
-async function updateMinOrderQty() {
-    try {
-        let symbolInfo = null;
-        // tenta primeiro obter via cache server
-        try {
-            symbolInfo = await fetchCache('exchangeInfo', { symbol });
-        } catch (e) {
-            console.warn('[updateMinOrderQty] falha no cache server:', e.message);
-        }
-
-        // se cache não respondeu, **não** consultar API direta (evita rate limit)
-        if (!symbolInfo) {
-            console.warn('[updateMinOrderQty] cache indisponível e consulta direta desabilitada – tentaremos usar cache local.');
-        }
-
-        // se ainda não temos dados, tentamos usar cache local gravado anteriormente
-        if (!symbolInfo || !symbolInfo.symbol) {
-            const allCached = loadStepCache();
-            const cached = allCached[symbol];
-            if (cached) {
-                stepSize = cached.stepSize;
-                minQty = cached.minQty;
-                minAmt = cached.minAmt;
-                console.log(chalk.yellow(`[CACHE] Usando filtros em cache local para ${symbol}: ` +
-                    `stepSize=${stepSize} minQty=${minQty} minAmt=${minAmt}`));
-                await balanceUpdt();
-                return;
-            }
-            throw new Error('Não foi possível obter informações de lote e nenhum cache local disponível.');
-        }
-
-        const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
-        const minNotionalFilter =
-            symbolInfo.filters.find(f => f.filterType === 'NOTIONAL') ||
-            symbolInfo.filters.find(f => f.filterType === 'MIN_NOTIONAL');
-
-        if (lotSize) {
-            minQty = parseFloat(lotSize.minQty);
-            stepSize = parseFloat(lotSize.stepSize);
-        }
-
-        minAmt = minNotionalFilter ? parseFloat(minNotionalFilter.minNotional) : 5;
-
-        // grava valores para usos futuros (sobrescreve só o symbol atual)
-        if (stepSize !== null && minQty !== null) {
-            const allCached = loadStepCache();
-            allCached[symbol] = { stepSize, minQty, minAmt };
-            saveStepCache(allCached);
-        }
-
-        await balanceUpdt();
-
-        console.log(`Valor mínimo de ordem em ${base}: ${minAmt}`);
-        console.log(`Quantidade mínima de ${moeda}: ${minQty}`);
-        console.log(`Step Size de ${moeda}: ${stepSize}`);
-
-    } catch (error) {
-        console.error('Erro ao obter mínimos via cache:', error.message);
-    }
-}
-
-// Aplica valores mutáveis de cfg carregada em runtime
-function applyConfig(newCfg) {
-    try {
-        cfg = newCfg;
-        // campos simples
-        pctBaseLong = Math.min(Math.max(parseFloat(cfg.seguranca.pctBaseLong ?? pctBaseLong), 0), 1);
-        pctMoedaShort = Math.min(Math.max(parseFloat(cfg.seguranca.pctMoedaShort ?? pctMoedaShort), 0), 1);
-
-        rsiBuy = cfg.rsi.rsiBuy ?? rsiBuy;
-        rsiSell = cfg.rsi.rsiSell ?? rsiSell;
-        alvoBuy = cfg.alvos.alvoBuy ?? alvoBuy;
-        alvoSell = cfg.alvos.alvoSell ?? alvoSell;
-
-        secureTrend = cfg.seguranca.secureTrend ?? secureTrend;
-        secureLow = cfg.seguranca.secureLow ?? secureLow;
-        secureHigh = cfg.seguranca.secureHigh ?? secureHigh;
-        stopLossPercentLong = cfg.seguranca.stopLossPercentLong ?? stopLossPercentLong;
-        stopLossPercentShort = cfg.seguranca.stopLossPercentShort ?? stopLossPercentShort;
-
-        // operacoes (reinvestimento) – revalida defaults
-        cfg.operacao = cfg.operacao || {};
-        cfg.operacao.reinvestProfits = cfg.operacao.reinvestProfits ?? false;
-
-        // monitoringInterval and other timing changes require restart to take full effect
-        console.log(chalk.green('[CONFIG] Novas configurações aplicadas: pctBaseLong=' + pctBaseLong + ' pctMoedaShort=' + pctMoedaShort));
-    } catch (err) {
-        console.error('Erro ao aplicar nova config:', err.message || err);
-    }
-}
-
-// Observa mudanças no config.json e aplica campos mutáveis sem reiniciar
-fs.watchFile(CONFIG_PATH, { interval: 1500 }, (curr, prev) => {
-    if (curr.mtimeMs === prev.mtimeMs) return;
-    try {
-        const newCfg = loadConfig();
-        applyConfig(newCfg);
-    } catch (err) {
-        console.error(`Erro ao recarregar ${CONFIG_PATH}:`, err.message || err);
-    }
-});
-
-// ─────────────────────────────────────────────
-// Dados de Mercado
-// ─────────────────────────────────────────────
-
-// agora obtém candle através do cache server (mesmo endpoint usado para RSI)
-async function getLastCandle() {
-    try {
-        const resp = await fetch(`${CACHE_URL}/cache?symbol=${symbol}&interval=${candleInterval}`);
-        if (!resp.ok) {
-            console.warn('[getLastCandle] resposta não ok', resp.status);
-            return null;
-        }
-        const arr = await resp.json();
-        if (!Array.isArray(arr) || arr.length === 0) {
-            return null;
-        }
-
-        // O último elemento pode ser vela em andamento.
-        // Para variação usamos a vela anterior (fechada), mas somente se há candles suficientes.
-        if (arr.length < 2) {
-            console.warn('[getLastCandle] candle insuficiente para variação (array length < 2).');
-            return null;
-        }
-
-        const prevClose = parseFloat(arr[arr.length - 2]);
-        if (Number.isNaN(prevClose)) {
-            console.warn('[getLastCandle] candle retornado inválido:', arr[arr.length - 2]);
-            return null;
-        }
-
-        console.log(chalk.gray(`[getLastCandle] usando candle fechado anterior: ${prevClose} (arr.length=${arr.length})`));
-        return prevClose;
-    } catch (error) {
-        console.error(`Erro ao obter candle de ${candleInterval}:`, error.message);
-    }
-    return null;
-}
-
-async function update24hStats() {
-    try {
-        const resp = await fetch(`${CACHE_URL}/stats24h?symbol=${symbol}`);
-        if (!resp.ok) {
-            console.warn('[update24hStats] resposta não ok', resp.status);
-            return;
-        }
-        const ticker = await resp.json();
-        dailyLow = parseFloat(ticker.lowPrice);
-        dailyHigh = parseFloat(ticker.highPrice);
-    } catch (error) {
-        console.error('Erro ao obter stats 24h:', error.message);
-    }
-}
-
-// ─────────────────────────────────────────────
-// Saldo da Conta (Real ou Demo)
-// ─────────────────────────────────────────────
-
-async function balanceUpdt() {
-    try {
-        if (DEMO) {
-            balanceAmt = demoBalance.base;
-            balanceQty = demoBalance.moeda;
-        } else {
-            const accountInfo = await withRetry(() => client.accountInfo(), [], 3, 1000);
-            const balances = accountInfo.balances;
-            balanceAmt = parseFloat(balances.find(b => b.asset === base)?.free ?? '0');
-            balanceQty = parseFloat(balances.find(b => b.asset === moeda)?.free ?? '0');
-        }
-
-        const tag = DEMO ? chalk.yellow('[DEMO] ') : '';
-        console.log(`${tag}Saldo ${base}: ${balanceAmt.toFixed(4)} | ${moeda}: ${balanceQty}`);
-        console.log('-----------------------------------');
-    } catch (error) {
-        console.error('Erro ao atualizar saldo:', error.message);
-    }
-}
-
-// Aplicar trade fees do símbolo na inicialização (não bloqueante)
-async function applySymbolFeesOnInit() {
-    if (!DEMO) {
-        try {
-            const fees = await fetchTradeFees(symbol);
-            if (tradeFeePerSymbol[symbol]) {
-                console.log(chalk.green(`[FEES] Taxa taker para ${symbol} obtida: ${tradeFeePerSymbol[symbol]}`));
-            }
-        } catch (e) {
-            console.warn('Aviso: não foi possível obter trade fees na inicialização:', e.message || e);
-        }
-    }
-}
-
-// ─────────────────────────────────────────────
-// Ordens
-// ─────────────────────────────────────────────
-
-function logOrderDetails(order) {
-    if (!order || !order.orderId) {
-        console.warn('⚠️ Ordem vazia ou sem resultado.');
-        return;
-    }
-
-    const { orderId, symbol, side, executedQty, cummulativeQuoteQty, status, transactTime } = order;
-    const timestamp = new Date(transactTime).toLocaleString();
-    const avgPrice = parseFloat(cummulativeQuoteQty) / parseFloat(executedQty || 1);
-    const taxaEst = parseFloat(cummulativeQuoteQty) * TAX_MARKET;
-
-    const baseLog = `
-📄 Ordem ID       : ${orderId}
-📊 Símbolo        : ${symbol}
-💰 Preço Médio    : ${avgPrice.toFixed(6)}
-📦 Quantidade     : ${executedQty}
-💸 Taxa est.      : ~${taxaEst.toFixed(6)} ${base}
-⏱️ Data/Hora      : ${timestamp}
-📌 Status         : ${status}\n`;
-
-    if (side.toUpperCase() === 'SELL') {
-        console.log('\n🔻 [VENDA EXECUTADA]', baseLog);
-    } else {
-        console.log('\n🟢 [COMPRA EXECUTADA]', baseLog);
-    }
-}
-
-/**
- * Simula uma ordem de mercado no modo DEMO.
- * Aplica a taxa de market sobre o valor da operação e atualiza os saldos virtuais.
- */
-function createDemoOrder(side, roundedQty) {
-    if (roundedQty < minQty) {
-        console.warn(`⚠️ [DEMO] Quantidade ${roundedQty} abaixo do mínimo (${minQty}). Ordem cancelada.`);
-        return null;
-    }
-
-    const tradeValue = roundedQty * currentPrice;
-    const taxa = tradeValue * TAX_MARKET;
+function createDemoOrder(side, qty) {
+    if (qty < (minQty || 0)) { console.warn(`⚠️ [DEMO] qty ${qty} < minQty ${minQty}`); return null; }
+    const value = qty * currentPrice;
+    const taxa = value * TAX_MARKET;
 
     if (side === 'SELL') {
-        if (demoBalance.moeda < roundedQty) {
-            console.warn(`⚠️ [DEMO] Saldo insuficiente de ${moeda} para vender.`);
-            return null;
-        }
-        demoBalance.moeda -= roundedQty;
-        demoBalance.base += tradeValue - taxa;
+        if (demoBalance.moeda < qty) { console.warn(`⚠️ [DEMO] saldo ${moeda} insuficiente`); return null; }
+        demoBalance.moeda -= qty;
+        demoBalance.base += value - taxa;
     } else {
-        const totalCost = tradeValue + taxa;
-        if (demoBalance.base < totalCost) {
-            console.warn(`⚠️ [DEMO] Saldo insuficiente de ${base} para comprar.`);
-            return null;
-        }
-        demoBalance.base -= totalCost;
-        demoBalance.moeda += roundedQty;
+        const cost = value + taxa;
+        if (demoBalance.base < cost) { console.warn(`⚠️ [DEMO] saldo ${base} insuficiente`); return null; }
+        demoBalance.base -= cost;
+        demoBalance.moeda += qty;
     }
 
-    const now = Date.now();
     const tag = chalk.yellow('[DEMO] ');
     const label = side === 'SELL' ? '🔻 [VENDA SIMULADA]' : '🟢 [COMPRA SIMULADA]';
     console.log(`\n${tag}${label}`);
-    console.log(`${tag}Qtd: ${roundedQty} ${moeda} | Preço: ${currentPrice} | Valor: ${tradeValue.toFixed(4)} ${base} | Taxa: ~${taxa.toFixed(6)} ${base}`);
-    console.log(`${tag}Saldo pós-ordem → ${base}: ${demoBalance.base.toFixed(4)} | ${moeda}: ${demoBalance.moeda}`);
+    console.log(`${tag}Qty: ${qty} ${moeda} | Preço: ${currentPrice} | Valor: ${value.toFixed(4)} ${base} | Taxa: ~${taxa.toFixed(6)} ${base}`);
+    console.log(`${tag}Saldo → ${base}: ${demoBalance.base.toFixed(4)} | ${moeda}: ${demoBalance.moeda}`);
 
+    const now = Date.now();
     return {
-        orderId: `DEMO-${now}`,
-        symbol,
-        side: side.toUpperCase(),
-        type: 'MARKET',
-        executedQty: String(roundedQty),
-        cummulativeQuoteQty: String(tradeValue),
-        status: 'FILLED',
-        transactTime: now,
+        orderId: `DEMO-${now}`, symbol, side: side.toUpperCase(), type: 'MARKET',
+        executedQty: String(qty), cummulativeQuoteQty: String(value),
+        status: 'FILLED', transactTime: now,
     };
 }
 
-async function createOrder(side, quantity, isStopLoss = false, isDCAOrder = false) {
-    try {
-        if (isOrderPending) {
-            console.warn('Outra ordem está pendente — ignorando nova ordem para evitar duplicatas.');
-            return null;
-        }
-        isOrderPending = true;
+/**
+ * Cria e executa uma ordem MARKET.
+ * @param {string}  side        'BUY' | 'SELL'
+ * @param {number}  quantity    quantidade bruta desejada
+ * @param {boolean} isStopLoss  indica se é ordem de stop
+ * @returns {object|null}       resultado da ordem ou null em caso de falha
+ */
+async function createOrder(side, quantity, isStopLoss = false) {
+    if (isOrderPending) { console.warn('Ordem pendente — ignorando.'); return null; }
+    isOrderPending = true;
 
-        // Ajusta quantidade para respeitar filtros
-        let roundedQty = await adjustQtyToFilters(quantity, side);
-        if (!roundedQty || Number.isNaN(roundedQty) || roundedQty <= 0) {
-            console.warn('Quantidade ajustada inválida ou insuficiente para respeitar filtros/minNotional. Ordem cancelada.');
+    try {
+        const roundedQty = await adjustQty(quantity, side);
+        if (!roundedQty || isNaN(roundedQty) || roundedQty <= 0) {
+            console.warn('Quantidade inválida após ajuste. Ordem cancelada.');
             return null;
         }
 
         let order;
-
         if (DEMO) {
             order = createDemoOrder(side, roundedQty);
         } else {
-            if (roundedQty < minQty) {
-                console.warn(`⚠️ Quantidade ${roundedQty} abaixo do mínimo (${minQty}). Ordem cancelada.`);
-                return null;
-            }
+            if (roundedQty < (minQty || 0)) { console.warn(`qty ${roundedQty} < minQty ${minQty}`); return null; }
             order = await client.order({
-                symbol,
-                side: side.toUpperCase(),
-                type: 'MARKET',
-                quantity: roundedQty,
-                newOrderRespType: 'FULL',
+                symbol, side: side.toUpperCase(), type: 'MARKET',
+                quantity: roundedQty, newOrderRespType: 'FULL',
             });
-            logOrderDetails(order);
+            logOrder(order);
         }
-
         if (!order) return null;
+
+        await balanceUpdt();
 
         const execQty = parseFloat(order.executedQty);
         const execQuote = parseFloat(order.cummulativeQuoteQty);
         const avgPrice = execQuote / execQty;
 
-        // Atualiza saldo
-        try {
-            await balanceUpdt();
-        } catch (e) {
-            console.warn('Aviso: falha ao atualizar saldo antes de registrar trade:', e.message || e);
-        }
-
-        // ─────────────────────────────────────────────
-        // Integração com Estratégia DCA
-        // ─────────────────────────────────────────────
-        if (dcaEnabled) {
-            // Inicializa estratégia DCA se não existir
-            if (!dcaStrategy) {
-                dcaStrategy = new DCAStrategy({
-                    maxExtraOrders: dcaMaxOrders,
-                    targetPercent: dcaTargetPercent,
-                    symbol,
-                    base,
-                    moeda,
-                    strategy,
-                    profitConfig: (cfg.dca && cfg.dca.profitConfig) ? cfg.dca.profitConfig : {}
-                });
-            }
-
-            // Lógica DCA baseada no side e strategy
-            if (strategy === 'LONG') {
-                if (side.toUpperCase() === 'BUY') {
-                    // Compra inicial ou ordem extra
-                    if (!dcaStrategy.isActive) {
-                        // Primeira compra - inicia estratégia
-                        dcaStrategy.startPosition(avgPrice, execQty, execQuote);
-                    } else if (!isDCAOrder && dcaStrategy.isActive) {
-                        // Pode ser uma ordem extra automática via DCA
-                        // Vamos verificar se é movimento contrário
-                        const shouldAdd = dcaStrategy.checkContraryMove(avgPrice);
-                        if (shouldAdd && !isStopLoss) {
-                            dcaStrategy.addPosition(avgPrice, execQty, execQuote);
-                        }
-                    }
-
-                    buyPrice = avgPrice;
-                    // acumula valor de compra para reutilização posterior
-                    buyAmount = (buyAmount || 0) + execQuote;
-
-                } else if (side.toUpperCase() === 'SELL' && dcaStrategy.isActive) {
-                    // Venda - pode ser fechamento de posição
-                    if (dcaStrategy.checkTarget(avgPrice)) {
-                        // Atingiu o alvo - fecha posição com lucro
-                        const dcaAvgEntry = dcaStrategy.averageEntryPrice; // salva antes do reset
-                        const result = dcaStrategy.closePosition(avgPrice, execQty, execQuote);
-                        // log detalhado de fechamento de DCA
-                        if (result) {
-                            console.log(chalk.magenta(`📦 DCA fechado: lucro ${result.profit.toFixed(8)} ${base} ` +
-                                `(esperado ${result.expectedProfit.toFixed(8)} ${base})`));
-                        }
-                        // Registra trade normalmente
-                        let feePaid = null;
-                        try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                        await registrarTrade('SELL', dcaAvgEntry, avgPrice, execQty, isStopLoss, feePaid);
-                        buyPrice = null;
-                        buyAmount = null;
-                    } else {
-                        // Venda normal (não DCA) - registra trade normalmente
-                        let feePaid = null;
-                        try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                        await registrarTrade('SELL', buyPrice, avgPrice, execQty, isStopLoss, feePaid);
-                        buyPrice = null;
-                        buyAmount = null;
-                        dcaStrategy.cancel('Venda manual');
-                    }
-                }
-
-            } else if (strategy === 'SHORT') {
-                if (side.toUpperCase() === 'SELL') {
-                    // Venda inicial (abertura de SHORT)
-                    if (!dcaStrategy.isActive) {
-                        dcaStrategy.startPosition(avgPrice, execQty, execQuote);
-                    } else if (!isDCAOrder && dcaStrategy.isActive) {
-                        const shouldAdd = dcaStrategy.checkContraryMove(avgPrice);
-                        if (shouldAdd && !isStopLoss) {
-                            dcaStrategy.addPosition(avgPrice, execQty, execQuote);
-                        }
-                    }
-
-                    sellPrice = avgPrice;
-                    // acumula valor de venda incluindo extras
-                    sellAmount = (sellAmount || 0) + execQuote;
-
-                } else if (side.toUpperCase() === 'BUY' && dcaStrategy.isActive) {
-                    // Compra - fechamento de SHORT
-                    if (dcaStrategy.checkTarget(avgPrice)) {
-                        const dcaAvgEntry = dcaStrategy.averageEntryPrice; // salva antes do reset
-                        const result = dcaStrategy.closePosition(avgPrice, execQty, execQuote);
-                        // log detalhado de fechamento de DCA
-                        if (result) {
-                            console.log(chalk.magenta(`📦 DCA fechado: lucro ${result.profit.toFixed(8)} ${base} ` +
-                                `(esperado ${result.expectedProfit.toFixed(8)} ${base})`));
-                        }
-                        let feePaid = null;
-                        try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                        await registrarTrade('BUY', dcaAvgEntry, avgPrice, execQty, isStopLoss, feePaid);
-                        sellPrice = null;
-                        sellAmount = null;
-                    } else {
-                        let feePaid = null;
-                        try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                        await registrarTrade('BUY', sellPrice, avgPrice, execQty, isStopLoss, feePaid);
-                        sellPrice = null;
-                        sellAmount = null;
-                        dcaStrategy.cancel('Compra manual');
-                    }
-                }
-            }
-
-            // fallback for cases where DCA is enabled but the strategy was just cancelled
-            if (!dcaStrategy.isActive) {
-                if (side.toUpperCase() === 'SELL' && strategy === 'LONG' && buyPrice) {
-                    let feePaid = null;
-                    try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                    await registrarTrade('SELL', buyPrice, avgPrice, execQty, isStopLoss, feePaid);
-                    buyPrice = null;
-                    buyAmount = null;
-                }
-                if (side.toUpperCase() === 'BUY' && strategy === 'SHORT' && sellPrice) {
-                    let feePaid = null;
-                    try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                    await registrarTrade('BUY', sellPrice, avgPrice, execQty, isStopLoss, feePaid);
-                    sellPrice = null;
-                    sellAmount = null;
-                }
-            }
-
-        } else {
-            // Lógica original sem DCA
-            if (side.toUpperCase() === 'SELL' && strategy === 'SHORT') {
-                sellPrice = avgPrice;
-                sellAmount = (sellAmount || 0) + execQuote;
-            } else if (side.toUpperCase() === 'BUY' && strategy === 'SHORT' && sellPrice) {
-                let feePaid = null;
-                try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                await registrarTrade('BUY', sellPrice, avgPrice, execQty, isStopLoss, feePaid);
-            } else if (side.toUpperCase() === 'BUY' && strategy === 'LONG') {
-                buyPrice = avgPrice;
-                buyAmount = (buyAmount || 0) + execQuote;
-            } else if (side.toUpperCase() === 'SELL' && strategy === 'LONG' && buyPrice) {
-                let feePaid = null;
-                try { feePaid = await calcOrderFeeInBase(order); } catch (e) { feePaid = null; }
-                await registrarTrade('SELL', buyPrice, avgPrice, execQty, isStopLoss, feePaid);
-            }
-        }
+        // ── Integração com DCA ─────────────────────────────────────────────
+        await processDcaOrder(side, avgPrice, execQty, execQuote, order, isStopLoss);
 
         return order;
 
-    } catch (error) {
-        console.error('❌ Erro ao criar ordem:', error.message);
+    } catch (e) {
+        console.error('❌ Erro na ordem:', e.message);
         return null;
     } finally {
         isOrderPending = false;
     }
 }
 
-// ─────────────────────────────────────────────
-// Stop Loss
-// ─────────────────────────────────────────────
+/**
+ * Processa a ordem em relação ao estado DCA e registra o trade quando necessário.
+ */
+async function processDcaOrder(side, avgPrice, execQty, execQuote, order, isStopLoss) {
+    const sideBuy = side.toUpperCase() === 'BUY';
+    const sideSell = side.toUpperCase() === 'SELL';
 
-async function checkStopLossLong() {
-    if (stopLossPercentLong <= 0) return;
+    if (dcaEnabled) {
+        // Garante instância DCA
+        if (!dcaStrategy) {
+            dcaStrategy = new DCAStrategy({
+                maxOrders: dcaMaxOrders, targetPercent: dcaTargetPercent,
+                symbol, base, moeda, strategy,
+                profitConfig: cfg.dca?.profitConfig || {},
+            });
+        }
 
-    if (dcaEnabled && dcaStrategy && dcaStrategy.isActive && dcaStrategy.checkContraryMove(currentPrice)) {
-        console.log(chalk.cyan(`[DCA] LONG movimento contrário detectado, deixando DCA processar antes de stop loss.`));
-        return;
-    }
+        if (strategy === 'LONG') {
+            if (sideBuy) {
+                if (!dcaStrategy.isActive) {
+                    dcaStrategy.startPosition(avgPrice, execQty, execQuote);
+                } else {
+                    dcaStrategy.addPosition(avgPrice, execQty, execQuote, true);
+                }
+                buyPrice = avgPrice;
+                buyAmount = (buyAmount || 0) + execQuote;
 
-    if (tradeSide === 'SELL' && (buyPrice || (dcaStrategy && dcaStrategy.isActive))) {
-        // Usa o preço de entrada apropriado (DCA ou normal)
-        const entryPrice = (dcaEnabled && dcaStrategy && dcaStrategy.isActive)
-            ? dcaStrategy.averageEntryPrice
-            : buyPrice;
-
-        if (!entryPrice) return;
-
-        // Calcula stop loss adaptativo se DCA ativo
-        const stopPercent = calculateAdaptiveStopLoss();
-        const stopLossPrice = entryPrice * (1 - stopPercent / 100);
-
-        if (currentPrice <= stopLossPrice) {
-            console.log(chalk.red(`[${new Date().toLocaleTimeString()}] 🛑 STOP LOSS LONG | Atual: ${currentPrice} | Stop: ${stopLossPrice.toFixed(6)} (${stopPercent}%)`));
-
-            if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-                dcaStrategy.cancel('Stop Loss');
+            } else if (sideSell) {
+                const entryPrice = dcaStrategy.isActive ? dcaStrategy.averageEntryPrice : buyPrice;
+                if (dcaStrategy.isActive) {
+                    const result = dcaStrategy.closePosition(avgPrice, execQty, execQuote);
+                    if (result) console.log(chalk.magenta(`📦 DCA fechado: lucro ${result.profit.toFixed(8)} ${base}`));
+                }
+                const fee = await calcFeeInBase(order).catch(() => null);
+                await registrarTrade('SELL', entryPrice, avgPrice, execQty, isStopLoss, fee);
+                buyPrice = buyAmount = null;
             }
 
-            let quantity;
-            if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-                // Fecha toda a posição DCA
-                quantity = dcaStrategy.totalQuantity;
-            } else {
-                quantity = Math.max((buyAmount / buyPrice) * pctMoedaShort, minAmt / buyPrice);
+        } else { // SHORT
+            if (sideSell) {
+                if (!dcaStrategy.isActive) {
+                    dcaStrategy.startPosition(avgPrice, execQty, execQuote);
+                } else {
+                    dcaStrategy.addPosition(avgPrice, execQty, execQuote, true);
+                }
+                sellPrice = avgPrice;
+                sellAmount = (sellAmount || 0) + execQuote;
+
+            } else if (sideBuy) {
+                const entryPrice = dcaStrategy.isActive ? dcaStrategy.averageEntryPrice : sellPrice;
+                if (dcaStrategy.isActive) {
+                    const result = dcaStrategy.closePosition(avgPrice, execQty, execQuote);
+                    if (result) console.log(chalk.magenta(`📦 DCA fechado: lucro ${result.profit.toFixed(8)} ${base}`));
+                }
+                const fee = await calcFeeInBase(order).catch(() => null);
+                await registrarTrade('BUY', entryPrice, avgPrice, execQty, isStopLoss, fee);
+                sellPrice = sellAmount = null;
             }
+        }
 
-            const order = await createOrder('SELL', quantity, true);
-
-            if (order) {
-                tradeSide = 'BUY';
-                buyPrice = null;
-                buyAmount = null;
-                console.log(chalk.red('✅ Stop Loss LONG executado.'));
-                console.log('-----------------------------------');
+    } else {
+        // ── Sem DCA ────────────────────────────────────────────────────────
+        if (strategy === 'LONG') {
+            if (sideBuy) {
+                buyPrice = avgPrice;
+                buyAmount = (buyAmount || 0) + execQuote;
+            } else if (sideSell && buyPrice) {
+                const fee = await calcFeeInBase(order).catch(() => null);
+                await registrarTrade('SELL', buyPrice, avgPrice, execQty, isStopLoss, fee);
+                buyPrice = buyAmount = null;
+            }
+        } else {
+            if (sideSell) {
+                sellPrice = avgPrice;
+                sellAmount = (sellAmount || 0) + execQuote;
+            } else if (sideBuy && sellPrice) {
+                const fee = await calcFeeInBase(order).catch(() => null);
+                await registrarTrade('BUY', sellPrice, avgPrice, execQty, isStopLoss, fee);
+                sellPrice = sellAmount = null;
             }
         }
     }
 }
 
-async function checkStopLossShort() {
-    if (stopLossPercentShort <= 0) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// STOP LOSS ADAPTATIVO
+// ─────────────────────────────────────────────────────────────────────────────
 
-    if (dcaEnabled && dcaStrategy && dcaStrategy.isActive && dcaStrategy.checkContraryMove(currentPrice)) {
-        console.log(chalk.cyan(`[DCA] SHORT movimento contrário detectado, deixando DCA processar antes de stop loss.`));
-        return;
-    }
-
-    if (tradeSide === 'BUY' && (sellPrice || (dcaStrategy && dcaStrategy.isActive))) {
-        const entryPrice = (dcaEnabled && dcaStrategy && dcaStrategy.isActive)
-            ? dcaStrategy.averageEntryPrice
-            : sellPrice;
-
-        if (!entryPrice) return;
-
-        const stopPercent = calculateAdaptiveStopLoss();
-        const stopLossPrice = entryPrice * (1 + stopPercent / 100);
-
-        if (currentPrice >= stopLossPrice) {
-            console.log(chalk.red(`[${new Date().toLocaleTimeString()}] 🛑 STOP LOSS SHORT | Atual: ${currentPrice} | Stop: ${stopLossPrice.toFixed(6)} (${stopPercent}%)`));
-
-            if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-                dcaStrategy.cancel('Stop Loss');
-            }
-
-            await balanceUpdt();
-
-            let quantity;
-            if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-                quantity = dcaStrategy.totalQuantity;
-            } else {
-                const baseForBuy = sellAmount || getEffectiveBalanceAmt(currentPrice);
-                quantity = Math.max((baseForBuy * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minQty);
-            }
-
-            const order = await createOrder('BUY', quantity, true);
-
-            if (order) {
-                tradeSide = 'SELL';
-                sellPrice = null;
-                sellAmount = null;
-                console.log(chalk.red('✅ Stop Loss SHORT executado.'));
-                console.log('-----------------------------------');
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------
-// Função para calcular stop loss adaptativo baseado no DCA
-// ---------------------------------------------------------
-
-function calculateAdaptiveStopLoss() {
-    if (!dcaEnabled || !dcaStrategy || !dcaStrategy.isActive || !cfg.dca?.adaptiveStopLoss) {
-        // Se DCA não está ativo ou stop loss adaptativo desabilitado, usa stop loss normal
+function calcAdaptiveStopPct() {
+    const buffer = cfg.dca?.stopLossBuffer ?? 1.5;
+    if (!dcaEnabled || !dcaStrategy?.isActive || !cfg.dca?.adaptiveStopLoss) {
         return strategy === 'LONG' ? stopLossPercentLong : stopLossPercentShort;
     }
 
-    const stopLossBuffer = (cfg.dca && typeof cfg.dca.stopLossBuffer === 'number') ? cfg.dca.stopLossBuffer : 1.5;
+    const { ordersCount, averageEntryPrice } = dcaStrategy.getPositionInfo();
+    const nextFactor = (dcaTargetPercent / 100) * (ordersCount + 1);
 
-    const posInfo = dcaStrategy.getPositionInfo();
-    const ordersUsed = posInfo.ordersCount;
-    const averagePrice = posInfo.averageEntryPrice;
-
-    // Para evitar stop loss apertado demais, garantimos que ele seja pelo menos o buffer configurado
-    // e também que permita as próximas ordens DCA.
-    let adaptiveStopPercent;
-
+    let stopPct;
     if (strategy === 'LONG') {
-        // Próxima ordem extra em função do targetPercent
-        const nextOrderPrice = averagePrice * (1 - (dcaTargetPercent / 100) * (ordersUsed + 1));
-        const stopFromAvg = ((averagePrice - nextOrderPrice) / averagePrice) * 100;
-
-        const minStopByDca = stopFromAvg * stopLossBuffer;
-        adaptiveStopPercent = Math.max(stopLossPercentLong, stopLossBuffer, minStopByDca);
-
-        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentLong}%, buffer: ${stopLossBuffer}%)`));
-        console.log(chalk.cyan(`   Próxima ordem extra em: $${nextOrderPrice.toFixed(2)} (-${stopFromAvg.toFixed(2)}%)`));
-
-    } else { // SHORT
-        const nextOrderPrice = averagePrice * (1 + (dcaTargetPercent / 100) * (ordersUsed + 1));
-        const stopFromAvg = ((nextOrderPrice - averagePrice) / averagePrice) * 100;
-
-        const minStopByDca = stopFromAvg * stopLossBuffer;
-        adaptiveStopPercent = Math.max(stopLossPercentShort, stopLossBuffer, minStopByDca);
-
-        console.log(chalk.cyan(`📊 Stop Loss Adaptativo: ${adaptiveStopPercent.toFixed(2)}% (original: ${stopLossPercentShort}%, buffer: ${stopLossBuffer}%)`));
-        console.log(chalk.cyan(`   Próxima ordem extra em: $${nextOrderPrice.toFixed(2)} (+${stopFromAvg.toFixed(2)}%)`));
+        const nextOrderPrice = averageEntryPrice * (1 - nextFactor);
+        const dropToNext = ((averageEntryPrice - nextOrderPrice) / averageEntryPrice) * 100;
+        stopPct = Math.max(stopLossPercentLong, buffer, dropToNext * buffer);
+    } else {
+        const nextOrderPrice = averageEntryPrice * (1 + nextFactor);
+        const riseToNext = ((nextOrderPrice - averageEntryPrice) / averageEntryPrice) * 100;
+        stopPct = Math.max(stopLossPercentShort, buffer, riseToNext * buffer);
     }
 
-    return Math.min(adaptiveStopPercent, 5); // Cap de 5% para segurança
+    console.log(chalk.cyan(`📊 Stop Adaptativo: ${stopPct.toFixed(2)}% (buffer ${buffer}%)`));
+    return Math.min(stopPct, 5); // cap de segurança
 }
 
-// ─────────────────────────────────────────────
-// Estratégias
-// ─────────────────────────────────────────────
+async function checkStopLoss() {
+    if (!currentPrice) return;
 
-async function executeSellStrategy() {
-    // antes da estratégia normal, veja se DCA ativo deve disparar ordem extra
-    if (dcaEnabled && dcaStrategy && dcaStrategy.isActive && strategy === 'SHORT') {
-        if (dcaStrategy.checkContraryMove(currentPrice)) {
+    if (strategy === 'LONG' && stopLossPercentLong > 0 && tradeSide === 'SELL') {
+        if (dcaStrategy?.isActive && dcaStrategy.checkContraryMove(currentPrice)) return;
+
+        const entryPrice = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : buyPrice;
+        if (!entryPrice) return;
+
+        const stopPct = calcAdaptiveStopPct();
+        const stopPrice = entryPrice * (1 - stopPct / 100);
+
+        if (currentPrice <= stopPrice) {
+            console.log(chalk.red(`${nowStr()} 🛑 STOP LOSS LONG | Atual: ${currentPrice} | Stop: ${stopPrice.toFixed(6)} (${stopPct}%)`));
+            const qty = dcaStrategy?.isActive
+                ? dcaStrategy.totalQuantity
+                : Math.max((buyAmount / buyPrice) * pctBaseLong, (minAmt || 5) / currentPrice);
+
+            dcaStrategy?.cancel('Stop Loss');
+            const order = await createOrder('SELL', qty, true);
+            if (order) { tradeSide = 'BUY'; buyPrice = buyAmount = null; console.log(chalk.red('✅ Stop LONG executado.')); }
+        }
+
+    } else if (strategy === 'SHORT' && stopLossPercentShort > 0 && tradeSide === 'BUY') {
+        if (dcaStrategy?.isActive && dcaStrategy.checkContraryMove(currentPrice)) return;
+
+        const entryPrice = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : sellPrice;
+        if (!entryPrice) return;
+
+        const stopPct = calcAdaptiveStopPct();
+        const stopPrice = entryPrice * (1 + stopPct / 100);
+
+        if (currentPrice >= stopPrice) {
+            console.log(chalk.red(`${nowStr()} 🛑 STOP LOSS SHORT | Atual: ${currentPrice} | Stop: ${stopPrice.toFixed(6)} (${stopPct}%)`));
+            const qty = dcaStrategy?.isActive
+                ? dcaStrategy.totalQuantity
+                : Math.max((getAvailableBase() * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minQty || 0);
+
+            dcaStrategy?.cancel('Stop Loss');
             await balanceUpdt();
-
-            // Obter saldo SEM consumir profitBankBase (apenas usar lucro se a ordem realmente executar)
-            let availableBalance = DEMO ? demoBalance.moeda : balanceQty;
-
-            // DCA extra SHORT: usar mesmo percentual da ordem normal (pctMoedaShort)
-            const quantity = Math.max(
-                (availableBalance * pctMoedaShort) / (1 + TAX_MARKET),
-                Math.max(minQty, minAmt / currentPrice)
-            );
-            if (quantity && quantity > 0) {
-                console.log(chalk.cyan(`📊 DCA extra SHORT: quantidade ${quantity.toFixed(8)} (${(pctMoedaShort * 100).toFixed(0)}% de ${availableBalance.toFixed(8)})`));
-
-                // A ordem precisa atingir o minNotional; se o stepSize fizer a quantidade ficar abaixo do mínimo,
-                // consideramos o minQty como base mínima para a verificação.
-                const qtyCheck = Math.max(quantity, minQty);
-                if (currentPrice && (qtyCheck * currentPrice) < minAmt) {
-                    console.log(chalk.yellow(`⚠️ DCA extra SHORT: valor ${(qtyCheck * currentPrice).toFixed(4)} abaixo do minNotional (${minAmt}). Ordem ignorada.`));
-                    return;
-                }
-
-                const order = await createOrder('SELL', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
-                if (order) {
-                    console.log(chalk.green(`✅ DCA extra vendido: ${quantity} ${moeda}`));
-                }
-            }
-            return; // não executar lógica principal
-        }
-    }
-
-    if (rsi === null && (rsiSell !== 0 || rsiBuy !== 0)) {
-        console.log(chalk.yellow('[STRATEGY] RSI indisponível — pulando sell strategy neste ciclo.'));
-        return;
-    }
-    // secureLow só vale para *entrada* de SHORT; quando estamos fechando uma posição LONG
-    // devemos ignorar o filtro (fechamento não precisa obedecer "abaixo do mínimo diário").
-    const isClosingLong = strategy === 'LONG' && tradeSide === 'SELL';
-    const aboveDailyLow = dailyLow ? currentPrice > (dailyLow * secureLow) : true;
-
-    // variação usada para decidir alvo (entry baseado em candle anterior para SHORT ou preço de compra para LONG)
-    let changePercentage;
-    if (strategy === 'SHORT') {
-        if (!previousCandleClose) {
-            console.log(chalk.gray('[SELL] Aguardando previousCandleClose...'));
-            return;
-        }
-        changePercentage = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
-    } else {
-        if (!buyPrice) {
-            console.log(chalk.gray('[SELL] Aguardando buyPrice para calcular variação (LONG)...'));
-            return;
-        }
-        changePercentage = ((currentPrice - buyPrice) / buyPrice) * 100;
-    }
-
-    // tendência sempre comparada com a vela anterior, não com o preço de entrada
-    // SHORT: quer vender quando sobe → trend = preço subindo (trendPct <= secureTrend = sem queda excessiva)
-    // LONG:  quer vender quando subiu → trend = preço ainda subindo (trendPct >= -secureTrend)
-    const trendPct = previousCandleClose
-        ? ((currentPrice - previousCandleClose) / previousCandleClose) * 100
-        : null;
-    if (strategy === 'SHORT') {
-        trend = secureTrend === 0 ? true : (trendPct !== null && trendPct <= secureTrend);
-    } else {
-        // LONG: confirma que o preço não está caindo além do threshold
-        trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
-    }
-
-    if (tradeSide === 'SELL' && (rsi >= rsiSell || rsiSell === 0)) {
-        // log waiting conditions for LONG strategy closing position
-        if (strategy === 'LONG') {
-            const okVariacao = changePercentage >= alvoSell;
-            const okTrend = trend;
-            const okLowFilter = isClosingLong ? true : aboveDailyLow;
-            if (!okVariacao || !okTrend || !okLowFilter) {
-                let msg = `[SELL] Aguardando condições → ` +
-                    `Variação: ${changePercentage.toFixed(3)}% (alvo ≥ ${alvoSell}%) ${okVariacao ? '✅' : '❌'} | ` +
-                    `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% > ${secureTrend}%)`}`;
-                if (!isClosingLong) {
-                    msg += ` | SecureLow: ${okLowFilter ? '✅' : '❌'}`;
-                } else {
-                    msg += ` | SecureLow: ignored (fechamento)`;
-                }
-                console.log(chalk.gray(msg));
-            }
-        }
-        if (changePercentage >= alvoSell && trend && (isClosingLong ? true : aboveDailyLow)) {
-
-            await balanceUpdt();
-            console.log(`[${new Date().toLocaleTimeString()}] Variação: ${changePercentage.toFixed(2)}% | Ordem de Venda acionada`);
-
-            let quantity;
-            const minQtyFromAmount = minAmt / currentPrice;
-
-            // LONG: está fechando a posição (vender moeda acumulada)
-            if (isClosingLong) {
-                // Deveria ter capturado cycleStartBalanceBase na ordem BUY inicial
-                const availableMoeda = DEMO ? demoBalance.moeda : balanceQty;
-
-                if (cfg.operacao.reinvestProfits) {
-                    // reinvestProfits=true: Vender TODA a moeda disponível
-                    quantity = Math.max(
-                        (availableMoeda * (1 - TAX_MARKET)),
-                        Math.max(minQty, minQtyFromAmount)
-                    );
-                    console.log(chalk.magenta(`[LONG CLOSE] reinvest=true: vendendo ${availableMoeda.toFixed(8)} ${moeda}`));
-                } else {
-                    // reinvestProfits=false: Vender apenas a moeda necessária, deixar base restaurada
-                    const targetBase = cycleStartBalanceBase || 0;
-                    const currentBase = DEMO ? demoBalance.base : balanceAmt;
-
-                    if (currentBase < targetBase) {
-                        const deficit = targetBase - currentBase;
-                        const necessario = deficit / currentPrice;
-                        quantity = Math.min(necessario, availableMoeda);
-                    } else {
-                        // Já temos base suficiente, vender tudo
-                        quantity = availableMoeda;
-                    }
-                    console.log(chalk.magenta(`[LONG CLOSE] reinvest=false: restaurando base até ${targetBase.toFixed(8)} ${base}`));
-                }
-            } else {
-                // SHORT: entrada normal (captura ciclo na primeira ordem)
-                if (!cycleStartBalanceMoeda) {
-                    cycleStartBalanceMoeda = DEMO ? demoBalance.moeda : balanceQty;
-                }
-                quantity = Math.max((cycleStartBalanceMoeda * pctMoedaShort) / (1 + TAX_MARKET), Math.max(minQty, minQtyFromAmount));
-            }
-
-            const order = await createOrder('SELL', quantity, false, true);
-
-            if (order) {
-                // Se em fechamento LONG com reinvestProfits, consumir profitBankBase
-                if (isClosingLong && cfg.operacao.reinvestProfits && profitBankBase > 0) {
-                    profitBankBase = 0; // Todo profitBankBase foi recebido em base
-                    console.log(chalk.magenta(`[LONG CLOSE] profitBankBase consumido e recebido em base`));
-                }
-                // independente de DCA, após vender a lógica principal deve alternar o lado
-                tradeSide = 'BUY';
-                buyPrice = null;
-                buyAmount = null;
-                console.log(`✅ Venda executada: ${quantity} ${moeda}`);
-                console.log('-----------------------------------');
-            }
+            const order = await createOrder('BUY', qty, true);
+            if (order) { tradeSide = 'SELL'; sellPrice = sellAmount = null; console.log(chalk.red('✅ Stop SHORT executado.')); }
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CÁLCULO DE TENDÊNCIA
+// ─────────────────────────────────────────────────────────────────────────────
+
+function calcTrend(forSell) {
+    if (!previousCandleClose || secureTrend === 0) return true;
+    const trendPct = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
+    if (forSell && strategy === 'SHORT') return trendPct <= secureTrend;
+    return trendPct >= -secureTrend;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUANTIDADE PARA ORDENS PRINCIPAIS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function calcBuyQty() {
+    // LONG: entrada — usa cycleStartBalanceBase para manter mesmo capital entre ciclos
+    if (!cycleStartBalanceBase) cycleStartBalanceBase = getAvailableBase();
+
+    // modo "equal": usa capital do ciclo + banco de lucros acumulados
+    const efectiva = cycleStartBalanceBase + (cfg.operacao.reinvestMode === 'equal' ? profitBankBase : 0);
+    const qty = Math.max(
+        (efectiva * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)),
+        (minAmt || 5) / currentPrice
+    );
+
+    // se usou profitBankBase, consome-o
+    if (cfg.operacao.reinvestMode === 'equal' && profitBankBase > 0) {
+        console.log(chalk.magenta(`[EQUAL] Usando banco ${profitBankBase.toFixed(8)} ${base} na ordem BUY`));
+        profitBankBase = 0;
+    }
+    return qty;
+}
+
+function calcSellQtyLongClose() {
+    // LONG close: vende a moeda acumulada (ou a posição DCA inteira)
+    if (dcaEnabled && dcaStrategy?.isActive) return dcaStrategy.totalQuantity;
+    return Math.max(getAvailableMoeda() * SAFETY_MARGIN, minQty || 0);
+}
+
+function calcSellQtyShortOpen() {
+    // SHORT: entrada — vende moeda
+    if (!cycleStartBalanceMoeda) cycleStartBalanceMoeda = getAvailableMoeda();
+    const efectiva = cycleStartBalanceMoeda + (cfg.operacao.reinvestMode === 'equal' ? profitBankBase / (currentPrice || 1) : 0);
+    const qty = Math.max(
+        (efectiva * pctMoedaShort) / (1 + TAX_MARKET),
+        Math.max(minQty || 0, (minAmt || 5) / currentPrice)
+    );
+    if (cfg.operacao.reinvestMode === 'equal' && profitBankBase > 0) {
+        console.log(chalk.magenta(`[EQUAL] Usando banco ${profitBankBase.toFixed(8)} ${base} na ordem SELL`));
+        profitBankBase = 0;
+    }
+    return qty;
+}
+
+function calcBuyQtyShortClose() {
+    // SHORT close: recompra moeda
+    if (dcaEnabled && dcaStrategy?.isActive) return dcaStrategy.totalQuantity;
+    const availBase = getAvailableBase() + (cfg.operacao.reinvestProfits ? profitBankBase : 0);
+    return Math.max(
+        availBase / (currentPrice * (1 + TAX_MARKET)),
+        Math.max(minQty || 0, (minAmt || 5) / currentPrice)
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTRATÉGIA DE COMPRA (BUY)
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function executeBuyStrategy() {
-    // DCA extra para LONG
-    if (dcaEnabled && dcaStrategy && dcaStrategy.isActive && strategy === 'LONG') {
+    if (!currentPrice) return;
+
+    // ── DCA extra LONG ───────────────────────────────────────────────────────
+    if (dcaEnabled && dcaStrategy?.isActive && strategy === 'LONG') {
         if (dcaStrategy.checkContraryMove(currentPrice)) {
             await balanceUpdt();
-
-            // Obter saldo disponível
-            let availableBalance = DEMO ? demoBalance.base : balanceAmt;
-
-            // DCA extra LONG: usar mesmo percentual da ordem normal (pctBaseLong)
-            const quantity = Math.max(
-                (availableBalance * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)),
-                Math.max(minQty, minAmt / currentPrice)
+            const avail = getAvailableBase();
+            const qty = Math.max(
+                (avail * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)),
+                Math.max(minQty || 0, (minAmt || 5) / currentPrice)
             );
-            if (quantity && quantity > 0) {
-                console.log(chalk.cyan(`📊 DCA extra LONG: quantidade ${quantity.toFixed(8)} (${(pctBaseLong * 100).toFixed(0)}% de ${availableBalance.toFixed(8)})`));
-
-                // A ordem precisa atingir o minNotional; se o stepSize fizer a quantidade ficar abaixo do mínimo,
-                // consideramos o minQty como base mínima para a verificação.
-                const qtyCheck = Math.max(quantity, minQty);
-                if (currentPrice && (qtyCheck * currentPrice) < minAmt) {
-                    console.log(chalk.yellow(`⚠️ DCA extra LONG: valor ${(qtyCheck * currentPrice).toFixed(4)} abaixo do minNotional (${minAmt}). Ordem ignorada.`));
-                    return;
-                }
-
-                const order = await createOrder('BUY', quantity, false, false); // isDCAOrder=false → createOrder já chama addPosition internamente
-                if (order) {
-                    console.log(chalk.green(`✅ DCA extra comprado: ${quantity} ${moeda}`));
-                }
+            if (qty * currentPrice < (minAmt || 5)) {
+                console.log(chalk.yellow(`⚠️ DCA extra LONG abaixo do minNotional`)); return;
             }
+            console.log(chalk.cyan(`📊 DCA extra LONG: ${qty.toFixed(8)} ${moeda}`));
+            const order = await createOrder('BUY', qty);
+            if (order) console.log(chalk.green(`✅ DCA LONG extra executado`));
             return;
         }
     }
 
+    // RSI guard
     if (rsi === null && (rsiBuy !== 0 || rsiSell !== 0)) {
-        console.log(chalk.yellow('[STRATEGY] RSI indisponível — pulando buy strategy neste ciclo.'));
-        return;
+        console.log(chalk.yellow('[BUY] RSI indisponível — pulando.')); return;
     }
-    // secureHigh só deve ser aplicado quando estamos entrando em LONG;
-    // fechamento de SHORT ignora esse filtro.
+
     const isClosingShort = strategy === 'SHORT' && tradeSide === 'BUY';
-    const belowDailyHigh = dailyHigh ? currentPrice < (dailyHigh / secureHigh) : true;
 
-    // variação usada para calcular se atingiu alvo (entry) — SHORT usa sellPrice, LONG usa vela anterior
-    let changePercentage;
-    if (strategy === 'SHORT') {
-        if (!sellPrice) {
-            console.log(chalk.gray('[BUY] Aguardando sellPrice para calcular variação (SHORT)...'));
-            return;
-        }
-        changePercentage = ((currentPrice - sellPrice) / sellPrice) * 100;
-    } else {
-        // LONG: entrada baseada na queda desde a vela anterior
-        if (!previousCandleClose) {
-            console.log(chalk.gray('[BUY] Aguardando previousCandleClose...'));
-            return;
-        }
-        changePercentage = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
-    }
+    // ── LONG: entrada ────────────────────────────────────────────────────────
+    if (strategy === 'LONG' && tradeSide === 'BUY') {
+        if (rsi > rsiBuy && rsiBuy !== 0) return;
 
-    // tendência calculada sempre em relação à vela anterior
-    // SHORT: compra quando preço caiu suficiente → trend confirma que não está subindo (trendPct >= -secureTrend)
-    // LONG:  compra quando preço caiu suficiente → trend confirma que não está caindo demais (trendPct >= -secureTrend)
-    const trendPct = previousCandleClose
-        ? ((currentPrice - previousCandleClose) / previousCandleClose) * 100
-        : null;
-    trend = secureTrend === 0 ? true : (trendPct !== null && trendPct >= -secureTrend);
+        if (!previousCandleClose) { console.log(chalk.gray('[BUY] Aguardando candle...')); return; }
+        const changePct = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
+        const trendOk = calcTrend(false);
+        const highOk = secureHigh === 0 || (dailyHigh && currentPrice < dailyHigh / secureHigh);
 
-    // ── Bloco de entrada LONG (simétrico inverso ao SELL do SHORT) ──
-    if (tradeSide === 'BUY' && strategy === 'LONG' && (rsi <= rsiBuy || rsiBuy === 0)) {
+        const ok = changePct <= -alvoBuy && trendOk && highOk;
+        console.log(chalk.gray(`[LONG BUY] var=${changePct.toFixed(3)}% alvo≤-${alvoBuy}% ${ok ? '✅' : '❌'} | trend ${trendOk ? '✅' : '❌'} | high ${highOk ? '✅' : '❌'}`));
 
-        if (changePercentage <= -alvoBuy && trend && belowDailyHigh) {
-            await balanceUpdt();
-            console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra LONG acionada`);
+        if (!ok) return;
 
-            const minAmtQty = minAmt / currentPrice;
-            let quantity;
-
-            // Captura saldo do ciclo na primeira ordem BUY (LONG)
-            if (!cycleStartBalanceBase) {
-                cycleStartBalanceBase = DEMO ? demoBalance.base : balanceAmt;
-            }
-
-            const effectiveAmt = getEffectiveBalanceAmt(currentPrice);
-            quantity = Math.max((effectiveAmt * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), minAmtQty);
-
-            const order = await createOrder('BUY', quantity, false, true);
-
-            if (order) {
-                tradeSide = 'SELL';
-                sellPrice = null;
-                sellAmount = null;
-                console.log(`✅ Compra LONG executada: ${quantity} ${moeda}`);
-                console.log('-----------------------------------');
-            }
+        await balanceUpdt();
+        const qty = calcBuyQty();
+        const order = await createOrder('BUY', qty);
+        if (order) {
+            tradeSide = 'SELL'; sellPrice = sellAmount = null;
+            console.log(`✅ LONG: compra executada ${qty.toFixed(8)} ${moeda}`);
+            console.log(chalk.gray('───────────────────────────────────'));
         }
         return;
     }
 
-    // ── Bloco de fechamento SHORT (BUY fecha posição SHORT) ──
-    if (tradeSide === 'BUY' && strategy === 'SHORT' && (rsi <= rsiBuy || rsiBuy === 0)) {
-        const okVariacao = changePercentage <= -alvoBuy;
-        const okTrend = trend;
-        const okHighFilter = isClosingShort ? true : belowDailyHigh;
-
-        if (!okVariacao || !okTrend || !okHighFilter) {
-            let msg = `[BUY] Aguardando condições → ` +
-                `Variação: ${changePercentage.toFixed(3)}% (alvo ≤ -${alvoBuy}%) ${okVariacao ? '✅' : '❌'} | ` +
-                `Trend: ${okTrend ? '✅' : `❌ (${changePercentage.toFixed(3)}% < -${secureTrend}%)`}`;
-            if (!isClosingShort) {
-                msg += ` | SecureHigh: ${okHighFilter ? '✅' : '❌'}`;
-            } else {
-                msg += ` | SecureHigh: ignored (fechamento)`;
-            }
-            console.log(chalk.gray(msg));
+    // ── SHORT: fechamento (BUY fecha o SHORT) ────────────────────────────────
+    if (isClosingShort) {
+        // com DCA ativo e alvo não atingido, aguarda
+        if (dcaEnabled && dcaStrategy?.isActive && !dcaStrategy.checkTarget(currentPrice)) {
+            console.log(chalk.magenta(`[DCA] SHORT: alvo ${dcaStrategy.currentTargetPrice.toFixed(6)} não atingido.`)); return;
         }
 
-        if (changePercentage <= -alvoBuy && trend && (isClosingShort ? true : belowDailyHigh)) {
+        if (rsi > rsiBuy && rsiBuy !== 0) return;
+        if (!sellPrice && !(dcaEnabled && dcaStrategy?.isActive)) { console.log(chalk.gray('[SHORT BUY] Aguardando sellPrice...')); return; }
 
-            await balanceUpdt();
-            console.log(`[${new Date().toLocaleTimeString()}] Ordem de Compra acionada`);
+        const entryPrice = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : sellPrice;
+        const changePct = ((currentPrice - entryPrice) / entryPrice) * 100;
+        const trendOk = calcTrend(false);
 
-            let quantity;
-            const minQtyFromAmount = minAmt / currentPrice;
+        const ok = changePct <= -alvoBuy && trendOk;
+        console.log(chalk.gray(`[SHORT CLOSE] var=${changePct.toFixed(3)}% alvo≤-${alvoBuy}% ${ok ? '✅' : '❌'} | trend ${trendOk ? '✅' : '❌'}`));
 
-            // SHORT: está fechando a posição (restaurar moeda ao nível inicial)
-            if (isClosingShort) {
-                // Deveria ter capturado cycleStartBalanceMoeda na ordem SELL inicial
-                const targetMoeda = cycleStartBalanceMoeda || 0;
-                const currentMoeda = DEMO ? demoBalance.moeda : balanceQty;
-                const availableBase = DEMO ? demoBalance.base : balanceAmt;
+        if (!ok) return;
 
-                if (cfg.operacao.reinvestProfits) {
-                    // reinvestProfits=true: Usar TODO o base disponível (lucro + reserva) para comprar moeda
-                    // Isso inclui profitBankBase que foi acumulado
-                    const totalBase = availableBase + profitBankBase;
-                    quantity = Math.max(
-                        (totalBase / (currentPrice * (1 + TAX_MARKET))),
-                        Math.max(minQty, minQtyFromAmount)
-                    );
-                    console.log(chalk.magenta(`[SHORT CLOSE] reinvest=true: usando ${totalBase.toFixed(8)} ${base} (disponível + banco)`));
-                } else {
-                    // reinvestProfits=false: Usar apenas o necessário para restaurar moeda até target
-                    if (currentMoeda < targetMoeda) {
-                        const deficit = targetMoeda - currentMoeda;
-                        const necessario = deficit * currentPrice * (1 + TAX_MARKET);
-                        const usar = Math.min(necessario, availableBase);
-                        quantity = usar / (currentPrice * (1 + TAX_MARKET));
-                    } else {
-                        // Já temos moeda suficiente, compra mínimo
-                        quantity = minQty;
-                    }
-                    console.log(chalk.magenta(`[SHORT CLOSE] reinvest=false: restaurando até ${targetMoeda.toFixed(8)} ${moeda}`));
-                }
-            } else {
-                // LONG: entrada normal (captura ciclo na primeira ordem)
-                if (!cycleStartBalanceBase) {
-                    cycleStartBalanceBase = DEMO ? demoBalance.base : balanceAmt;
-                }
-                quantity = Math.max((cycleStartBalanceBase * pctBaseLong) / (currentPrice * (1 + TAX_MARKET)), Math.max(minQty, minQtyFromAmount));
-            }
+        await balanceUpdt();
+        const qty = calcBuyQtyShortClose();
 
-            const order = await createOrder('BUY', quantity, false, true); // marca como fechamento ou ordem "normal"
+        // consome profitBankBase se reinvest
+        if (cfg.operacao.reinvestProfits && profitBankBase > 0) profitBankBase = 0;
 
-            if (order) {
-                // Se em fechamento SHORT com reinvestProfits, consumir profitBankBase
-                if (isClosingShort && cfg.operacao.reinvestProfits && profitBankBase > 0) {
-                    profitBankBase = 0; // Todo profitBankBase foi convertido em moeda
-                    console.log(chalk.magenta(`[SHORT CLOSE] profitBankBase consumido e convertido em moeda`));
-                }
-                // após qualquer compra "normal" trocamos o lado para SELL
-                tradeSide = 'SELL';
-                sellPrice = null;
-                sellAmount = null;
-                console.log(`✅ Compra executada: ${quantity} ${moeda}`);
-                console.log('-----------------------------------');
-            }
+        const order = await createOrder('BUY', qty);
+        if (order) {
+            tradeSide = 'SELL'; sellPrice = sellAmount = null;
+            console.log(`✅ SHORT fechado: compra ${qty.toFixed(8)} ${moeda}`);
+            console.log(chalk.gray('───────────────────────────────────'));
         }
     }
 }
 
-// ─────────────────────────────────────────────
-// Loop Principal de Monitoramento
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTRATÉGIA DE VENDA (SELL)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function executeSellStrategy() {
+    if (!currentPrice) return;
+
+    // ── DCA extra SHORT ──────────────────────────────────────────────────────
+    if (dcaEnabled && dcaStrategy?.isActive && strategy === 'SHORT') {
+        if (dcaStrategy.checkContraryMove(currentPrice)) {
+            await balanceUpdt();
+            const avail = getAvailableMoeda();
+            const qty = Math.max(
+                (avail * pctMoedaShort) / (1 + TAX_MARKET),
+                Math.max(minQty || 0, (minAmt || 5) / currentPrice)
+            );
+            if (qty * currentPrice < (minAmt || 5)) {
+                console.log(chalk.yellow(`⚠️ DCA extra SHORT abaixo do minNotional`)); return;
+            }
+            console.log(chalk.cyan(`📊 DCA extra SHORT: ${qty.toFixed(8)} ${moeda}`));
+            const order = await createOrder('SELL', qty);
+            if (order) console.log(chalk.green(`✅ DCA SHORT extra executado`));
+            return;
+        }
+    }
+
+    // RSI guard
+    if (rsi === null && (rsiBuy !== 0 || rsiSell !== 0)) {
+        console.log(chalk.yellow('[SELL] RSI indisponível — pulando.')); return;
+    }
+
+    const isClosingLong = strategy === 'LONG' && tradeSide === 'SELL';
+
+    // ── LONG: fechamento (SELL fecha o LONG) ─────────────────────────────────
+    if (isClosingLong) {
+        // com DCA ativo e alvo não atingido, aguarda
+        if (dcaEnabled && dcaStrategy?.isActive && !dcaStrategy.checkTarget(currentPrice)) {
+            console.log(chalk.magenta(`[DCA] LONG: alvo ${dcaStrategy.currentTargetPrice.toFixed(6)} não atingido.`)); return;
+        }
+
+        if (rsi < rsiSell && rsiSell !== 0) return;
+        if (!buyPrice && !(dcaEnabled && dcaStrategy?.isActive)) { console.log(chalk.gray('[LONG SELL] Aguardando buyPrice...')); return; }
+
+        const entryPrice = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : buyPrice;
+        const changePct = ((currentPrice - entryPrice) / entryPrice) * 100;
+        const trendOk = calcTrend(true);
+
+        const ok = changePct >= alvoSell && trendOk;
+        console.log(chalk.gray(`[LONG CLOSE] var=${changePct.toFixed(3)}% alvo≥${alvoSell}% ${ok ? '✅' : '❌'} | trend ${trendOk ? '✅' : '❌'}`));
+
+        if (!ok) return;
+
+        await balanceUpdt();
+        const qty = calcSellQtyLongClose();
+
+        if (cfg.operacao.reinvestProfits && profitBankBase > 0) profitBankBase = 0;
+
+        const order = await createOrder('SELL', qty);
+        if (order) {
+            tradeSide = 'BUY'; buyPrice = buyAmount = null;
+            console.log(`✅ LONG fechado: venda ${qty.toFixed(8)} ${moeda}`);
+            console.log(chalk.gray('───────────────────────────────────'));
+        }
+        return;
+    }
+
+    // ── SHORT: entrada ───────────────────────────────────────────────────────
+    if (strategy === 'SHORT' && tradeSide === 'SELL') {
+        if (rsi < rsiSell && rsiSell !== 0) return;
+
+        if (!previousCandleClose) { console.log(chalk.gray('[SHORT SELL] Aguardando candle...')); return; }
+        const changePct = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
+        const trendOk = calcTrend(true);
+        const lowOk = secureLow === 0 || (dailyLow && currentPrice > dailyLow * secureLow);
+
+        const ok = changePct >= alvoSell && trendOk && lowOk;
+        console.log(chalk.gray(`[SHORT SELL] var=${changePct.toFixed(3)}% alvo≥${alvoSell}% ${ok ? '✅' : '❌'} | trend ${trendOk ? '✅' : '❌'} | low ${lowOk ? '✅' : '❌'}`));
+
+        if (!ok) return;
+
+        await balanceUpdt();
+        const qty = calcSellQtyShortOpen();
+        const order = await createOrder('SELL', qty);
+        if (order) {
+            tradeSide = 'BUY'; buyPrice = buyAmount = null;
+            console.log(`✅ SHORT aberto: venda ${qty.toFixed(8)} ${moeda}`);
+            console.log(chalk.gray('───────────────────────────────────'));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOG DE STATS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function logStats() {
+    const fin = stats.financeiro;
+    const tr = stats.trades;
+    const lucro = fin.lucroLiquidoTotal;
+    const cor = lucro >= 0 ? chalk.green.bold : chalk.red.bold;
+    const lucroStr = `${lucro >= 0 ? '+' : ''}${lucro.toFixed(4)} ${base}`;
+
+    console.log(chalk.cyan('──────── 📊 DESEMPENHO ────────'));
+    console.log(`Trades : ${tr.total} | ✅ ${tr.lucrativos} | ❌ ${tr.prejuizo} | 🛑 ${tr.stopLossAcionados}`);
+    console.log(`Lucro  : ${cor(lucroStr)}`);
+    console.log(`Taxas  : ~${chalk.yellow(fin.taxasTotais.toFixed(4))} ${base}`);
+    console.log(`Melhor : ${chalk.green(`+${fin.maiorLucroTrade.toFixed(4)}`)} | Pior: ${chalk.red(`${fin.maiorPrejuizoTrade.toFixed(4)}`)}`);
+    if (fin.saldoInicialBase != null && fin.saldoAtualBase != null) {
+        const var_ = fin.saldoAtualBase - fin.saldoInicialBase;
+        const c = var_ >= 0 ? chalk.green : chalk.red;
+        console.log(`Saldo ${base}: ${fin.saldoInicialBase.toFixed(2)} → ${c(fin.saldoAtualBase.toFixed(2))} (${var_ >= 0 ? '+' : ''}${var_.toFixed(4)})`);
+    }
+    if (profitBankBase > 0) console.log(chalk.magenta(`💰 Banco lucros: ${profitBankBase.toFixed(8)} ${base}`));
+    console.log(chalk.cyan('──────────────────────────────'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOOP PRINCIPAL
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function monitor() {
     try {
-        // certificar-se de que o cache server já está rastreando nosso par/intervalo
-        try {
-            await fetch(`${CACHE_URL}/cache?symbol=${symbol}&interval=${candleInterval}`);
-        } catch (e) {
-            // falha aqui não impede tentativa de pegar preço, mas deve ser investigada
-            console.warn('[monitor] não foi possível solicitar cache inicial:', e.message);
-        }
+        console.log(`\n${nowStr()} ──── CICLO ────`);
 
-        // buscar preço atual no cache server (com pequenas tentativas)
-        let attempts = 0;
-        while (attempts < 3) {
-            attempts++;
-            const resp = await fetch(`${CACHE_URL}/price?symbol=${symbol}`);
-            if (resp.ok) {
-                const json = await resp.json();
-                currentPrice = json && json.price != null ? parseFloat(json.price) : null;
-            } else {
-                console.warn('[monitor] falha ao obter preço', resp.status);
-            }
-            await update24hStats();
-            if (currentPrice && !isNaN(currentPrice) && currentPrice > 0) break;
-            // aguarda 100ms e tenta novamente (cache server pode ainda estar priming)
-            await new Promise(r => setTimeout(r, 100));
-        }
+        // 1. Dados de mercado
+        await getPrice();
+        await update24hStats();
 
-        if (currentPrice === undefined || currentPrice === null || isNaN(currentPrice) || currentPrice <= 0) {
-            throw new Error('Preço atual inválido');
-        }
-
-        const newCandleClose = await getLastCandle();
-        if (newCandleClose !== null) {
-            if (!previousCandleCloseInitialized) {
-                previousCandleClose = newCandleClose;
-                previousCandleCloseInitialized = true;
-                console.log(chalk.yellow('[monitor] candle inicial capturado; aguardando próximo ciclo para uso de variação.'));
-                // Não executar lógica de estratégia no primeiro ciclo com candle capturado para evitar comparação com fechamento antigo.
+        const candleClose = await getLastCandleClose();
+        if (candleClose !== null) {
+            if (!candleInitialized) {
+                previousCandleClose = candleClose;
+                candleInitialized = true;
+                console.log(chalk.yellow('[CANDLE] Capturado pela primeira vez — aguardando próximo ciclo.'));
                 return;
             }
-            previousCandleClose = newCandleClose;
+            previousCandleClose = candleClose;
         }
 
+        // 2. RSI
         const rsiRaw = await updtRsi.getValue(symbol, candleInterval, rsiPeriod);
-        if (rsiRaw === null || rsiRaw === undefined || Number.isNaN(Number(rsiRaw))) {
-            console.warn('Aviso: RSI indisponível neste ciclo — execuções dependentes de RSI serão ignoradas.');
-            rsi = null;
-        } else {
-            rsi = Math.round(Number(rsiRaw));
-        }
+        rsi = (rsiRaw != null && !isNaN(Number(rsiRaw))) ? Math.round(Number(rsiRaw)) : null;
+        if (rsi === null) console.warn('[RSI] Indisponível neste ciclo.');
 
-        // Variação para exibição no log
-        let changePercentRaw = null;
-        if ((strategy === 'SHORT' && tradeSide === 'SELL') || (strategy === 'LONG' && tradeSide === 'BUY')) {
-            changePercentRaw = previousCandleClose
-                ? ((currentPrice - previousCandleClose) / previousCandleClose * 100)
-                : null;
+        // 3. Atualiza tendência global (para log)
+        trend = calcTrend(tradeSide === 'SELL');
+
+        // 4. Calcula variação para log
+        let changePct = null;
+        if (strategy === 'LONG' && tradeSide === 'SELL') {
+            const entry = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : buyPrice;
+            if (entry) changePct = ((currentPrice - entry) / entry) * 100;
         } else if (strategy === 'SHORT' && tradeSide === 'BUY') {
-            changePercentRaw = sellPrice ? ((currentPrice - sellPrice) / sellPrice * 100) : null;
-        } else if (strategy === 'LONG' && tradeSide === 'SELL') {
-            changePercentRaw = buyPrice ? ((currentPrice - buyPrice) / buyPrice * 100) : null;
+            const entry = dcaStrategy?.isActive ? dcaStrategy.averageEntryPrice : sellPrice;
+            if (entry) changePct = ((currentPrice - entry) / entry) * 100;
+        } else if (previousCandleClose) {
+            changePct = ((currentPrice - previousCandleClose) / previousCandleClose) * 100;
         }
 
-        const changePercentLog = changePercentRaw !== null ? `${changePercentRaw.toFixed(2)}%` : 'N/A';
-
-        // Stop Loss
-        if (strategy === 'LONG') await checkStopLossLong();
-        else if (strategy === 'SHORT') await checkStopLossShort();
-
-        // ── Log de Status ────────────────────────────
-        const changeColor = changePercentRaw > 0 ? chalk.green : chalk.red;
-        const priceNow = chalk.white.bold(`${currentPrice}`);
-        const intervalVar = chalk.white.bold(`${candleInterval}`);
-        const lastSell = sellPrice ? chalk.blackBright(`${sellPrice.toFixed(6)}`) : chalk.gray('N/A');
-        const lastBuy = buyPrice ? chalk.blackBright(`${buyPrice.toFixed(6)}`) : chalk.gray('N/A');
-        const tradeSideColor = tradeSide === 'SELL'
-            ? chalk.white.bgRed.bold(` ${tradeSide} `) + chalk.black.bgBlack('.')
-            : chalk.white.bgGreen.bold(` ${tradeSide} `) + chalk.black.bgBlack('.');
-
-        const aboveDailyLow = dailyLow ? currentPrice > (dailyLow * secureLow) : null;
-        const belowDailyHigh = dailyHigh ? currentPrice < (dailyHigh / secureHigh) : null;
-        const secureLowStatus = aboveDailyLow ? chalk.white.bold('true') : chalk.magenta.bold('false');
-        const secureHighStatus = belowDailyHigh ? chalk.white.bold('true') : chalk.magenta.bold('false');
-        const trendStatus = trend ? chalk.white.bold('true') : chalk.magenta.bold('false');
-        const closingLong = strategy === 'LONG' && tradeSide === 'SELL';
-        const closingShort = strategy === 'SHORT' && tradeSide === 'BUY';
-
+        // 5. Log de status
+        const modeTag = DEMO ? chalk.yellow.bold('[DEMO] ') : '';
         const lucroAcum = stats.financeiro.lucroLiquidoTotal;
-        const lucroColor = lucroAcum >= 0 ? chalk.green.bold : chalk.red.bold;
-        const lucroStr = `${lucroAcum >= 0 ? '+' : ''}${lucroAcum.toFixed(4)} ${base}`;
-        const demoTag = DEMO ? chalk.yellow.bold('[DEMO] ') : '';
+        const lucroC = lucroAcum >= 0 ? chalk.green.bold : chalk.red.bold;
+        const changeTxt = changePct != null ? `${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%` : 'N/A';
+        const changeC = changePct != null ? (changePct >= 0 ? chalk.green : chalk.red) : chalk.gray;
+        const sideLabel = tradeSide === 'SELL'
+            ? chalk.white.bgRed.bold(` ${tradeSide} `)
+            : chalk.white.bgGreen.bold(` ${tradeSide} `);
 
-        if (strategy === 'SHORT') {
-            console.log(`${demoTag}[${new Date().toLocaleTimeString()}] Preço: ${priceNow} | Lucro: ${lucroColor(lucroStr)}`);
-            console.log(`Saldo atual → ${base}: ${balanceAmt != null ? balanceAmt.toFixed(4) : 'N/A'} | ${moeda}: ${balanceQty != null ? balanceQty : 'N/A'}`);
-            console.log(`Última venda: ${lastSell}`);
-            console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
-            console.log(`Modo: ${tradeSideColor}`);
-            if (tradeSide === 'SELL') {
-                console.log(`SecureLow: ${secureLowStatus}`);
-            } else {
-                if (closingShort) console.log(`SecureHigh: ${secureHighStatus} (fechamento - sem filtro)`);
-                else console.log(`SecureHigh: ${secureHighStatus}`);
-            }
-            console.log(`SecureTrend: ${trendStatus} | RSI: ${rsi}`);
-        } else {
-            console.log(`${demoTag}[${new Date().toLocaleTimeString()}] Preço: ${priceNow} | Lucro: ${lucroColor(lucroStr)}`);
-            console.log(`Saldo atual → ${base}: ${balanceAmt != null ? balanceAmt.toFixed(4) : 'N/A'} | ${moeda}: ${balanceQty != null ? balanceQty : 'N/A'}`);
-            console.log(`Última compra: ${lastBuy}`);
-            console.log(`Variação (${intervalVar}): ${changeColor(changePercentLog)}`);
-            console.log(`Side: ${tradeSideColor}`);
-            if (tradeSide === 'BUY') {
-                if (closingLong) console.log(`SecureHigh: ${secureHighStatus} (fechamento - sem filtro)`);
-                else console.log(`SecureHigh: ${secureHighStatus}`);
-            } else {
-                console.log(`SecureLow: ${secureLowStatus}`);
-            }
-            console.log(`SecureTrend: ${trendStatus} | RSI: ${rsi}`);
+        console.log(`${modeTag}Preço: ${chalk.white.bold(currentPrice)} | Lucro: ${lucroC(`${lucroAcum >= 0 ? '+' : ''}${lucroAcum.toFixed(4)} ${base}`)}`);
+        console.log(`Saldo → ${base}: ${balanceAmt?.toFixed(4) ?? 'N/A'} | ${moeda}: ${balanceQty ?? 'N/A'}`);
+        console.log(`Variação (${candleInterval}): ${changeC(changeTxt)} | Trend: ${trend ? chalk.white('✅') : chalk.magenta('❌')} | RSI: ${rsi ?? 'N/A'}`);
+        console.log(`Side: ${sideLabel} | Strategy: ${chalk.cyan(strategy)} | Mode: ${cfg.operacao.reinvestMode}`);
+
+        if (dcaEnabled && dcaStrategy?.isActive) {
+            const pos = dcaStrategy.getPositionInfo();
+            const profit = dcaStrategy.calculateGuaranteedProfit(currentPrice);
+            const pct = dcaStrategy.calculateProfitPercent(currentPrice);
+            console.log(chalk.magentaBright(`📊 DCA: ${pos.ordersCount}/${pos.maxOrders} ordens | Avg: ${pos.averageEntryPrice.toFixed(6)} | Alvo: ${pos.currentTargetPrice.toFixed(6)} | P&L: ${profit.toFixed(4)} ${base} (${pct.toFixed(2)}%)`));
         }
 
-        // Painel de desempenho acumulado
+        // 6. Stats acumulados
         logStats();
 
+        // 7. Stop Loss
+        await checkStopLoss();
+
+        // 8. Estratégias
         if (rsi === null && (rsiBuy !== 0 || rsiSell !== 0)) {
-            console.log(chalk.yellow('RSI ausente e não-zero nas configurações. Pulando estratégias que dependem de RSI.'));
+            console.log(chalk.yellow('RSI zerado e ausente — pulando estratégias.'));
         } else {
-            if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-                // com DCA ativo, precisamos verificar ambos os lados: extras e possíveis fechamentos
+            if (dcaEnabled && dcaStrategy?.isActive) {
+                // com DCA ativo verifica ambos os lados (extras e fechamentos)
                 await executeSellStrategy();
                 await executeBuyStrategy();
             } else {
@@ -2241,86 +1508,62 @@ async function monitor() {
             }
         }
 
-        // Dentro da função monitor(), após o log existente, adicione:
-        if (dcaEnabled && dcaStrategy && dcaStrategy.isActive) {
-            const posInfo = dcaStrategy.getPositionInfo();
-            const profitNow = dcaStrategy.calculateGuaranteedProfit(currentPrice);
-            const profitPercentNow = dcaStrategy.calculateProfitPercent(currentPrice);
-            const lastOrderPrice = dcaStrategy.lastActionPrice;
-
-            console.log(chalk.magentaBright(`📊 DCA Ativo: #${posInfo.ordersCount}/${posInfo.maxOrders} ordens | Última ordem: ${lastOrderPrice?.toFixed(6) || 'N/A'}`));
-            console.log(chalk.magentaBright(`   Preço médio: ${posInfo.averageEntryPrice.toFixed(6)} | Alvo: ${posInfo.currentTargetPrice.toFixed(6)}`));
-            console.log(chalk.magentaBright(`   Lucro atual: ${profitNow.toFixed(4)} ${base} (${profitPercentNow.toFixed(2)}%)`));
-            console.log(chalk.magentaBright('-----------------------------------'));
-        }
-
-        // Persistir estado para poder retomar após restart/reboot
-        saveState(getCurrentState());
-
-    } catch (error) {
-        console.error('Erro no monitoramento:', error.message);
+    } catch (e) {
+        console.error('❌ Erro no monitor:', e.message);
     } finally {
-        // garante persistência mesmo em caso de erro temporário
-        saveState(getCurrentState());
+        saveState();
     }
 }
 
-// ─────────────────────────────────────────────
-// Inicialização
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function withRetry(fn, retries = 3, delay = 500) {
+    for (let i = 0; i < retries; i++) {
+        try { return await fn(); }
+        catch (e) {
+            if (i === retries - 1) throw e;
+            console.warn(`Tentativa ${i + 1} falhou: ${e.message}. Retentando em ${delay}ms...`);
+            await sleep(delay);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INICIALIZAÇÃO
+// ─────────────────────────────────────────────────────────────────────────────
 
 (async () => {
-    const modeLabel = DEMO
-        ? chalk.yellow.bold('⚠️  MODO DEMO ATIVADO — Nenhuma ordem real será enviada')
-        : chalk.green.bold('🟢 MODO REAL');
+    console.log(DEMO
+        ? chalk.yellow.bold('⚠️  MODO DEMO — Nenhuma ordem real será enviada')
+        : chalk.green.bold('🟢 MODO REAL'));
+    console.log(`Estratégia: ${strategy} | Par: ${symbol} | Intervalo: ${candleInterval} | RSI: ${rsiPeriod}`);
+    console.log(`Taxas → Market: ${(TAX_MARKET * 100).toFixed(2)}% | Limit: ${(TAX_LIMIT * 100).toFixed(3)}%`);
+    console.log(`Reinvestimento → reinvestProfits: ${cfg.operacao.reinvestProfits} | reinvestMode: ${cfg.operacao.reinvestMode}`);
+    console.log(`DCA → enabled: ${dcaEnabled} | maxOrders: ${dcaMaxOrders} | targetPercent: ${dcaTargetPercent}%`);
+    console.log(chalk.gray('─────────────────────────────────────────────'));
 
-    console.log(modeLabel);
-    console.log(`Estratégia: ${strategy} | Par: ${symbol} | Intervalo: ${candleInterval}`);
-    console.log(`Taxas configuradas → Market: ${(TAX_MARKET * 100).toFixed(2)}% | Limit: ${(TAX_LIMIT * 100).toFixed(3)}%`);
-    console.log('-----------------------------------');
-
-    function logTS(msg) {
-        const d = new Date();
-        const pad = n => String(n).padStart(2, '0');
-        const ts = `[${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}-${d.getFullYear()}]`;
-        console.log(`${ts} ${msg}`);
-    }
-
-    // wrap monitor to log timestamp only at start
-    const originalMonitor = monitor;
-    // eslint-disable-next-line no-func-assign
-    monitor = async function () {
-        logTS('início de monitor');
-        await originalMonitor();
-    };
-
+    // Carrega filtros e saldo
     await updateMinOrderQty();
-    await applySymbolFeesOnInit();
+    await fetchTradeFees();
 
-    // Garantir que o saldo esteja carregado antes de validar o estado persistido
-    try {
-        await balanceUpdt();
-    } catch (e) {
-        console.warn('Aviso: falha ao atualizar saldo para validação de estado persistido:', e.message || e);
-    }
+    try { await balanceUpdt(); } catch (e) { console.warn('Aviso: falha ao obter saldo inicial:', e.message); }
 
-    // Valida o estado salvo e, se inconsistente, reseta para evitar trades incorretos
-    validatePersistedState();
+    // Restaura estado persistido e valida consistência
+    loadPersistedState();
+    validateState();
 
-    // Inicializa sessão nas stats (apenas na primeira execução)
-    // Se a sessão anterior for de outro modo (DEMO vs REAL) ou par diferente, reinicializa sessão
-    const currentModeLabel = DEMO ? 'DEMO' : 'REAL';
-    if (!stats.sessao.inicio || stats.sessao.modo !== currentModeLabel || stats.sessao.symbol !== symbol) {
-        // Se já existia uma sessão anterior, arquiva o arquivo de stats atual para histórico
-        if (stats && stats.sessao && stats.sessao.inicio) {
-            archiveStats(stats);
-            stats = defaultStats();
-        }
-
+    // Inicializa sessão de stats
+    const modeLabel = DEMO ? 'DEMO' : 'REAL';
+    if (!stats.sessao.inicio || stats.sessao.modo !== modeLabel || stats.sessao.symbol !== symbol) {
+        if (stats.sessao.inicio) archiveStats();
+        stats = defaultStats();
         stats.sessao.inicio = new Date().toISOString();
-        stats.sessao.modo = currentModeLabel;
+        stats.sessao.modo = modeLabel;
         stats.sessao.symbol = symbol;
-        // Atualiza saldos iniciais para refletir o modo/par atual
         stats.financeiro.saldoInicialBase = DEMO ? demoBalance.base : balanceAmt;
         stats.financeiro.saldoAtualBase = stats.financeiro.saldoInicialBase;
         stats.financeiro.saldoInicialMoeda = DEMO ? demoBalance.moeda : balanceQty;
@@ -2331,8 +1574,9 @@ async function monitor() {
         stats.financeiro.saldoInicialMoeda = DEMO ? demoBalance.moeda : balanceQty;
         stats.financeiro.saldoAtualMoeda = stats.financeiro.saldoInicialMoeda;
     }
-    saveStats(stats);
+    saveStats();
 
+    // Inicia loop
     await monitor();
     setInterval(monitor, monitoringInterval);
 })();

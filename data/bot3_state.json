@@ -4,6 +4,9 @@
   "sellPrice": null,
   "buyAmount": null,
   "sellAmount": null,
+  "cycleStartBalanceBase": null,
+  "cycleStartBalanceMoeda": null,
+  "profitBankBase": 0.01487200000000041,
   "dca": {
     "isActive": false,
     "ordersCount": 0,
